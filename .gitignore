@@ -223,6 +223,7 @@ data/*.csv
 # Generated clustering reports and plots.
 outputs/clustering.md
 outputs/clustering_pca_scatter.png
+outputs/clustering_scree_plot.png
 
 # IDE settings
 .vscode/

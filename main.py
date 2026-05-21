@@ -34,6 +34,7 @@ from src.classification.preprocessing import (
 )
 from src.clustering.analysis import (
     plot_species_cluster_scatters,
+    plot_species_scree_plots,
     run_species_clustering_analysis,
     write_species_clustering_report,
 )
@@ -50,6 +51,7 @@ TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
 CLUSTERING_REPORT_PATH = PROJECT_ROOT / "outputs" / "clustering.md"
 CLUSTERING_PLOT_PATH = PROJECT_ROOT / "outputs" / "clustering_pca_scatter.png"
+CLUSTERING_SCREE_PLOT_PATH = PROJECT_ROOT / "outputs" / "clustering_scree_plot.png"
 
 
 def _load_train() -> tuple[pd.DataFrame, pd.Series]:
@@ -264,22 +266,36 @@ def main() -> None:
     # Plot generation is optional at runtime, but the markdown report is always written.
     plot_path = None
     plot_error = None
+    scree_plot_path = None
+    scree_plot_error = None
     try:
         plot_path = plot_species_cluster_scatters(species_results, CLUSTERING_PLOT_PATH)
     except RuntimeError as exc:
         plot_error = str(exc)
+    try:
+        scree_plot_path = plot_species_scree_plots(species_results, CLUSTERING_SCREE_PLOT_PATH)
+    except RuntimeError as exc:
+        scree_plot_error = str(exc)
 
     write_species_clustering_report(
         results=species_results,
         report_path=CLUSTERING_REPORT_PATH,
         plot_path=plot_path.relative_to(PROJECT_ROOT) if plot_path is not None else None,
         plot_error=plot_error,
+        scree_plot_path=(
+            scree_plot_path.relative_to(PROJECT_ROOT) if scree_plot_path is not None else None
+        ),
+        scree_plot_error=scree_plot_error,
     )
 
     if plot_path is not None:
         print(f"[4/4] Visualization written: {plot_path.relative_to(PROJECT_ROOT)}")
     else:
         print(f"[4/4] Visualization skipped: {plot_error}")
+    if scree_plot_path is not None:
+        print(f"      Scree plot written: {scree_plot_path.relative_to(PROJECT_ROOT)}")
+    else:
+        print(f"      Scree plot skipped: {scree_plot_error}")
 
     print("=" * 60)
     print("Clustering analysis completed.")

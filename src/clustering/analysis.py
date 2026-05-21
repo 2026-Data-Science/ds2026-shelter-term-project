@@ -45,10 +45,13 @@ class ClusteringAnalysisResult:
     pca_variance_threshold: float
     pca_explained_variance: float
     pca_first_two_variance: float
+    pca_elbow_component: int
+    pca_scree: pd.DataFrame
     selected_k: int
     inertia: float
     silhouette_sample: float
     top_breeds: list[str]
+    top_colors: list[str]
     candidate_scores: pd.DataFrame
     cluster_summary: pd.DataFrame
     outcome_distribution: pd.DataFrame
@@ -207,6 +210,44 @@ def _build_coordinate_frame(reduced: np.ndarray, labels: np.ndarray) -> pd.DataF
     )
 
 
+def _select_pca_component_count(explained: np.ndarray, pca_variance: float) -> int:
+    """Return the smallest component count that reaches the requested cumulative variance."""
+    if not 0.0 < pca_variance <= 1.0:
+        raise ValueError("pca_variance must be between 0.0 and 1.0.")
+    cumulative = np.cumsum(explained)
+    return int(np.searchsorted(cumulative, pca_variance, side="left") + 1)
+
+
+def _scree_elbow_component(explained: np.ndarray) -> int:
+    """Find the scree elbow by maximum distance from the first-to-last component line."""
+    if len(explained) <= 2:
+        return int(len(explained))
+
+    x = np.arange(1, len(explained) + 1, dtype=np.float64)
+    y = explained.astype(np.float64)
+    x1, y1 = x[0], y[0]
+    x2, y2 = x[-1], y[-1]
+    denominator = np.hypot(y2 - y1, x2 - x1)
+    if denominator == 0.0:
+        return 1
+
+    distances = np.abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1)
+    distances = distances / denominator
+    return int(np.argmax(distances) + 1)
+
+
+def _build_scree_frame(explained: np.ndarray) -> pd.DataFrame:
+    """Build a scree table with per-component and cumulative explained variance."""
+    components = np.arange(1, len(explained) + 1, dtype=int)
+    return pd.DataFrame(
+        {
+            "component": components,
+            "explained_variance": explained,
+            "cumulative_variance": np.cumsum(explained),
+        }
+    )
+
+
 def _ordered_animal_types(raw_features: pd.DataFrame) -> list[str]:
     """Return AnimalType values in Cat/Dog order first, with any unexpected values last."""
     if "AnimalType" not in raw_features.columns:
@@ -236,9 +277,14 @@ def run_clustering_analysis(
     preprocessing_pipeline = build_clustering_pipeline(include_animal_type=include_animal_type)
     preprocessed = _as_dense_array(preprocessing_pipeline.fit_transform(raw_features))
 
-    # PCA keeps enough components to explain the target variance while reducing one-hot noise.
-    pca = PCA(n_components=pca_variance, svd_solver="full", random_state=random_state)
-    reduced = pca.fit_transform(preprocessed)
+    # Fit full PCA once so the scree plot and the reduced matrix use the same decomposition.
+    pca = PCA(svd_solver="full", random_state=random_state)
+    full_reduced = pca.fit_transform(preprocessed)
+    component_count = _select_pca_component_count(pca.explained_variance_ratio_, pca_variance)
+    reduced = full_reduced[:, :component_count]
+    selected_explained = pca.explained_variance_ratio_[:component_count]
+    scree = _build_scree_frame(pca.explained_variance_ratio_)
+    elbow_component = _scree_elbow_component(pca.explained_variance_ratio_)
 
     candidate_scores = _score_kmeans_candidates(
         reduced=reduced,
@@ -269,7 +315,8 @@ def run_clustering_analysis(
             ),
         }
     )
-    top_breeds = sorted(preprocessing_pipeline.named_steps["breed_top_k"].top_breeds_)
+    top_breeds = sorted(preprocessing_pipeline.named_steps["breed_frequency"].retained_breeds_)
+    top_colors = sorted(preprocessing_pipeline.named_steps["color_top_k"].retained_colors_)
 
     return ClusteringAnalysisResult(
         segment_name=segment_name,
@@ -277,12 +324,15 @@ def run_clustering_analysis(
         preprocessed_shape=preprocessed.shape,
         pca_shape=reduced.shape,
         pca_variance_threshold=pca_variance,
-        pca_explained_variance=float(pca.explained_variance_ratio_.sum()),
+        pca_explained_variance=float(selected_explained.sum()),
         pca_first_two_variance=float(pca.explained_variance_ratio_[:2].sum()),
+        pca_elbow_component=elbow_component,
+        pca_scree=scree,
         selected_k=selected_k,
         inertia=float(final_model.inertia_),
         silhouette_sample=float(selected_score),
         top_breeds=top_breeds,
+        top_colors=top_colors,
         candidate_scores=candidate_scores,
         cluster_summary=cluster_summary,
         outcome_distribution=outcome_distribution,
@@ -441,6 +491,83 @@ def plot_species_cluster_scatters(
     return output_path
 
 
+def plot_species_scree_plots(
+    results: dict[str, ClusteringAnalysisResult],
+    output_path: Path,
+) -> Path:
+    """Save species-specific PCA scree plots with elbow components marked."""
+    if not results:
+        raise ValueError("No clustering results were provided for scree plotting.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Keep matplotlib's font/cache files outside the repository and away from unwritable home dirs.
+    mpl_config_dir = Path(gettempdir()) / "ds2026-shelter-matplotlib"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("matplotlib is required to generate scree plots.") from exc
+
+    fig, axes = plt.subplots(
+        1,
+        len(results),
+        figsize=(8 * len(results), 6),
+        dpi=150,
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+
+    for ax, result in zip(axes_flat, results.values()):
+        scree = result.pca_scree
+        elbow = result.pca_elbow_component
+        elbow_row = scree.loc[scree["component"] == elbow].iloc[0]
+
+        ax.plot(
+            scree["component"],
+            scree["explained_variance"],
+            marker="o",
+            linewidth=1.8,
+            markersize=4,
+        )
+        ax.axvline(elbow, color="crimson", linestyle="--", linewidth=1.2)
+        ax.scatter(
+            [elbow],
+            [elbow_row["explained_variance"]],
+            color="crimson",
+            s=60,
+            zorder=3,
+            label=f"Elbow PC{elbow}",
+        )
+        ax.set_title(f"{result.segment_name} PCA Scree Plot")
+        ax.set_xlabel("Principal component")
+        ax.set_ylabel("Explained variance ratio")
+        ax.grid(alpha=0.2)
+        ax.legend()
+
+        cumulative = float(elbow_row["cumulative_variance"])
+        ax.text(
+            0.98,
+            0.92,
+            f"Elbow: PC{elbow}\nCum. var: {cumulative:.3f}",
+            ha="right",
+            va="top",
+            transform=ax.transAxes,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85},
+        )
+
+    fig.suptitle("Species-Specific PCA Scree Plots")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
 def _dataframe_to_markdown(df: pd.DataFrame) -> str:
     """Render a small DataFrame as a GitHub-flavoured markdown table."""
     if df.empty:
@@ -480,9 +607,12 @@ def _append_result_sections(lines: list[str], result: ClusteringAnalysisResult) 
         f"(threshold={result.pca_variance_threshold:.2f})"
     )
     lines.append(f"- PC1 + PC2 explained variance: {result.pca_first_two_variance:.4f}")
+    lines.append(f"- Scree elbow component: PC{result.pca_elbow_component}")
     lines.append(f"- Selected K: **{result.selected_k}**")
     lines.append(f"- Final inertia: **{result.inertia:.4f}**")
     lines.append(f"- Sampled silhouette score: **{result.silhouette_sample:.4f}**")
+    lines.append(f"- Retained breed levels: {len(result.top_breeds)}")
+    lines.append(f"- Retained color levels: {len(result.top_colors)}")
     lines.append("")
     lines.append("#### K Selection")
     lines.append("")
@@ -524,7 +654,8 @@ def write_clustering_report(
     lines.append("")
     lines.append("- Raw input: shelter animal feature columns only")
     lines.append("- Feature engineering: age, date/time, sex/neuter status, breed, color, and name signals")
-    lines.append("- Breed reduction: keep top 30 `primary_breed` values and group the rest as `Other`")
+    lines.append("- Breed reduction: keep `primary_breed` values at or above 1% frequency and group the rest as `Other`")
+    lines.append("- Color reduction: keep the top 15 `primary_color` values and group the rest as `Other`")
     lines.append("- Numeric preprocessing: median imputation and RobustScaler")
     lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
     lines.append("- PCA: retain at least 95% of variance before K-Means")
@@ -586,6 +717,8 @@ def write_species_clustering_report(
     report_path: Path,
     plot_path: Optional[Path] = None,
     plot_error: Optional[str] = None,
+    scree_plot_path: Optional[Path] = None,
+    scree_plot_error: Optional[str] = None,
 ) -> Path:
     """Write a Cat/Dog-separated clustering report with PCA metrics and interpretation."""
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,7 +741,8 @@ def write_species_clustering_report(
     lines.append("- Split raw data by `AnimalType` (`Cat`, `Dog`)")
     lines.append("- Run feature engineering independently inside each species subset")
     lines.append("- Exclude `animal_type` from clustering features because it is constant after filtering")
-    lines.append("- Breed reduction: keep top 30 `primary_breed` values per species and group the rest as `Other`")
+    lines.append("- Breed reduction: keep `primary_breed` values at or above 1% frequency per species and group the rest as `Other`")
+    lines.append("- Color reduction: keep the top 15 `primary_color` values per species and group the rest as `Other`")
     lines.append("- Numeric preprocessing: median imputation and RobustScaler")
     lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
     lines.append("- PCA: retain at least 95% of variance before K-Means")
@@ -630,6 +764,11 @@ def write_species_clustering_report(
         lines.append(f"- Plot was skipped: {plot_error}")
     else:
         lines.append("- Plot was not requested.")
+    if scree_plot_path is not None:
+        lines.append(f"- PCA scree plot: `{scree_plot_path.as_posix()}`")
+        lines.append("- The dashed red line marks the scree elbow component for each species.")
+    elif scree_plot_error:
+        lines.append(f"- Scree plot was skipped: {scree_plot_error}")
     lines.append("")
     lines.append("## Notes")
     lines.append("")
