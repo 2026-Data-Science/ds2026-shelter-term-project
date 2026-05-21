@@ -33,9 +33,9 @@ from src.classification.preprocessing import (
     build_preprocessing_pipeline,
 )
 from src.clustering.analysis import (
-    plot_cluster_scatter,
-    run_clustering_analysis,
-    write_clustering_report,
+    plot_species_cluster_scatters,
+    run_species_clustering_analysis,
+    write_species_clustering_report,
 )
 
 # Force UTF-8 on Windows consoles that default to cp949.
@@ -242,31 +242,35 @@ def main() -> None:
     print("=" * 60)
 
     # The clustering workflow is unsupervised; y is passed only for post-hoc interpretation.
-    clustering_result = run_clustering_analysis(X, y)
-    print(
-        f"[1/4] Clustering preprocessing OK -> "
-        f"shape={clustering_result.preprocessed_shape}"
+    species_results = run_species_clustering_analysis(X, y)
+    split_summary = ", ".join(
+        f"{species}={result.raw_shape[0]}" for species, result in species_results.items()
     )
+    print(f"[1/4] Split by AnimalType -> {split_summary}")
     print(
-        f"[2/4] PCA reduction OK -> shape={clustering_result.pca_shape}, "
-        f"explained_variance={clustering_result.pca_explained_variance:.4f}"
+        "[2/4] Species-specific preprocessing and PCA OK -> "
+        + ", ".join(
+            f"{species}: encoded={result.preprocessed_shape}, pca={result.pca_shape}"
+            for species, result in species_results.items()
+        )
     )
-    print(
-        f"[3/4] KMeans selected K={clustering_result.selected_k}, "
-        f"silhouette={clustering_result.silhouette_sample:.4f}, "
-        f"inertia={clustering_result.inertia:.4f}"
-    )
+    for species, result in species_results.items():
+        print(
+            f"[3/4] {species} KMeans selected K={result.selected_k}, "
+            f"silhouette={result.silhouette_sample:.4f}, "
+            f"inertia={result.inertia:.4f}"
+        )
 
     # Plot generation is optional at runtime, but the markdown report is always written.
     plot_path = None
     plot_error = None
     try:
-        plot_path = plot_cluster_scatter(clustering_result, CLUSTERING_PLOT_PATH)
+        plot_path = plot_species_cluster_scatters(species_results, CLUSTERING_PLOT_PATH)
     except RuntimeError as exc:
         plot_error = str(exc)
 
-    write_clustering_report(
-        result=clustering_result,
+    write_species_clustering_report(
+        results=species_results,
         report_path=CLUSTERING_REPORT_PATH,
         plot_path=plot_path.relative_to(PROJECT_ROOT) if plot_path is not None else None,
         plot_error=plot_error,

@@ -25,6 +25,9 @@ BREED_OTHER_LABEL = "Other"
 CLUSTERING_NUMERIC_COLUMNS = list(ENGINEERED_NUMERIC_COLUMNS)
 # primary_breed stays categorical after Top-K; it is not dropped like in classification TE.
 CLUSTERING_CATEGORICAL_COLUMNS = list(ENGINEERED_CATEGORICAL_COLUMNS)
+SPECIES_SPECIFIC_CATEGORICAL_COLUMNS = [
+    column for column in CLUSTERING_CATEGORICAL_COLUMNS if column != "animal_type"
+]
 
 
 class _FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
@@ -35,6 +38,30 @@ class _FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         return engineer_features(X)
+
+
+class NeuterStatusGrouper(BaseEstimator, TransformerMixin):
+    """Group sex-specific sterilization labels for clustering only.
+
+    `sex` is already represented as a separate feature, so clustering should not
+    split otherwise similar animals only because females are labelled "Spayed"
+    and males are labelled "Neutered".
+    """
+
+    def fit(self, X: pd.DataFrame, y: Any = None) -> "NeuterStatusGrouper":
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if "neuter_status" not in X.columns:
+            raise ValueError("NeuterStatusGrouper expects 'neuter_status' in input frame.")
+
+        result = X.copy()
+        result["neuter_status"] = result["neuter_status"].replace(
+            {
+                "Spayed": "Neutered",
+            }
+        )
+        return result
 
 
 class TopKBreedEncoder(BaseEstimator, TransformerMixin):
@@ -75,7 +102,7 @@ class TopKBreedEncoder(BaseEstimator, TransformerMixin):
         return result
 
 
-def build_clustering_preprocessor() -> ColumnTransformer:
+def build_clustering_preprocessor(include_animal_type: bool = True) -> ColumnTransformer:
     """Impute, scale numerics, and one-hot categoricals — no target encoding step.
 
     Differences from classification build_column_preprocessor():
@@ -84,6 +111,11 @@ def build_clustering_preprocessor() -> ColumnTransformer:
     - Scaler: RobustScaler (classification uses StandardScaler).
     - Imputation / OneHot settings are the same (median, most_frequent, ignore unknown).
     """
+    categorical_columns = (
+        CLUSTERING_CATEGORICAL_COLUMNS
+        if include_animal_type
+        else SPECIES_SPECIFIC_CATEGORICAL_COLUMNS
+    )
     numeric_pipeline = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -100,7 +132,7 @@ def build_clustering_preprocessor() -> ColumnTransformer:
     return ColumnTransformer(
         transformers=[
             ("numeric", numeric_pipeline, CLUSTERING_NUMERIC_COLUMNS),
-            ("categorical", categorical_pipeline, CLUSTERING_CATEGORICAL_COLUMNS),
+            ("categorical", categorical_pipeline, categorical_columns),
         ],
         remainder="drop",
         verbose_feature_names_out=False,
@@ -109,21 +141,22 @@ def build_clustering_preprocessor() -> ColumnTransformer:
 
 def build_clustering_pipeline(
     top_k_breeds: int = DEFAULT_TOP_K_BREEDS,
+    include_animal_type: bool = True,
 ) -> Pipeline:
     """Unsupervised preprocessing: feature engineering -> Top-K breed -> impute/scale/encode.
 
     Differences from classification build_preprocessing_pipeline():
     - No BreedTargetEncoder and no OutcomeType (y) at fit time.
+    - Spayed and Neutered are grouped only for clustering, after shared feature engineering.
     - Extra TopKBreedEncoder step instead of supervised breed compression.
-    - No PCA here yet — add after this step when experimenting with KMeans/DBSCAN.
-
-    TODO(clustering): optional PCA(n_components=0.95) on the dense matrix for
-    distance-based algorithms once baseline clustering metrics are established.
+    - PCA is applied in src.clustering.analysis, after this reusable preprocessing step.
+    - For Cat/Dog-specific runs, animal_type is used as the filter and excluded as a feature.
     """
     return Pipeline(
         steps=[
             ("feature_engineering", _FeatureEngineeringTransformer()),
+            ("neuter_status_grouper", NeuterStatusGrouper()),
             ("breed_top_k", TopKBreedEncoder(top_k=top_k_breeds)),
-            ("preprocessor", build_clustering_preprocessor()),
+            ("preprocessor", build_clustering_preprocessor(include_animal_type)),
         ]
     )
