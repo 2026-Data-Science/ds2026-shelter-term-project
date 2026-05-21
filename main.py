@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import os
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Some macOS shells make joblib's physical-core detector noisy; keep runs readable by
+# setting an explicit worker cap below the logical core count when the user has not set one.
+if "LOKY_MAX_CPU_COUNT" not in os.environ:
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(max(1, (os.cpu_count() or 2) - 1))
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"joblib\.externals\.loky\.backend\.context",
+)
 
 import numpy as np
 import pandas as pd
@@ -20,6 +32,11 @@ from src.classification.preprocessing import (
     NUMERIC_COLUMNS_AFTER_TE,
     build_preprocessing_pipeline,
 )
+from src.clustering.analysis import (
+    plot_cluster_scatter,
+    run_clustering_analysis,
+    write_clustering_report,
+)
 
 # Force UTF-8 on Windows consoles that default to cp949.
 if hasattr(sys.stdout, "reconfigure"):
@@ -31,6 +48,8 @@ if hasattr(sys.stderr, "reconfigure"):
 PROJECT_ROOT = Path(__file__).resolve().parent
 TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
+CLUSTERING_REPORT_PATH = PROJECT_ROOT / "outputs" / "clustering.md"
+CLUSTERING_PLOT_PATH = PROJECT_ROOT / "outputs" / "clustering_pca_scatter.png"
 
 
 def _load_train() -> tuple[pd.DataFrame, pd.Series]:
@@ -214,8 +233,53 @@ def main() -> None:
     )
 
     print("=" * 60)
-    print("All checks passed.")
+    print("Classification preprocessing checks passed.")
     print(f"Report written: {REPORT_PATH.relative_to(PROJECT_ROOT)}")
+    print("=" * 60)
+
+    print("=" * 60)
+    print("Clustering analysis — PCA + K-Means")
+    print("=" * 60)
+
+    # The clustering workflow is unsupervised; y is passed only for post-hoc interpretation.
+    clustering_result = run_clustering_analysis(X, y)
+    print(
+        f"[1/4] Clustering preprocessing OK -> "
+        f"shape={clustering_result.preprocessed_shape}"
+    )
+    print(
+        f"[2/4] PCA reduction OK -> shape={clustering_result.pca_shape}, "
+        f"explained_variance={clustering_result.pca_explained_variance:.4f}"
+    )
+    print(
+        f"[3/4] KMeans selected K={clustering_result.selected_k}, "
+        f"silhouette={clustering_result.silhouette_sample:.4f}, "
+        f"inertia={clustering_result.inertia:.4f}"
+    )
+
+    # Plot generation is optional at runtime, but the markdown report is always written.
+    plot_path = None
+    plot_error = None
+    try:
+        plot_path = plot_cluster_scatter(clustering_result, CLUSTERING_PLOT_PATH)
+    except RuntimeError as exc:
+        plot_error = str(exc)
+
+    write_clustering_report(
+        result=clustering_result,
+        report_path=CLUSTERING_REPORT_PATH,
+        plot_path=plot_path.relative_to(PROJECT_ROOT) if plot_path is not None else None,
+        plot_error=plot_error,
+    )
+
+    if plot_path is not None:
+        print(f"[4/4] Visualization written: {plot_path.relative_to(PROJECT_ROOT)}")
+    else:
+        print(f"[4/4] Visualization skipped: {plot_error}")
+
+    print("=" * 60)
+    print("Clustering analysis completed.")
+    print(f"Report written: {CLUSTERING_REPORT_PATH.relative_to(PROJECT_ROOT)}")
     print("=" * 60)
 
 

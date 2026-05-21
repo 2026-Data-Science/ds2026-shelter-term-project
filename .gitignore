@@ -220,6 +220,10 @@ __marimo__/
 # Project data (Kaggle redistribution restriction)
 data/*.csv
 
+# Generated clustering reports and plots.
+outputs/clustering.md
+outputs/clustering_pca_scatter.png
+
 # IDE settings
 .vscode/
 .idea/
