@@ -38,6 +38,7 @@ from src.clustering.analysis import (
     run_species_clustering_analysis,
     write_species_clustering_report,
 )
+from src.clustering.preprocessing import CLUSTERING_VARIANT_ORDER
 
 # Force UTF-8 on Windows consoles that default to cp949.
 if hasattr(sys.stdout, "reconfigure"):
@@ -49,9 +50,16 @@ if hasattr(sys.stderr, "reconfigure"):
 PROJECT_ROOT = Path(__file__).resolve().parent
 TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
-CLUSTERING_REPORT_PATH = PROJECT_ROOT / "outputs" / "clustering.md"
-CLUSTERING_PLOT_PATH = PROJECT_ROOT / "outputs" / "clustering_pca_scatter.png"
-CLUSTERING_SCREE_PLOT_PATH = PROJECT_ROOT / "outputs" / "clustering_scree_plot.png"
+CLUSTERING_VARIANTS = CLUSTERING_VARIANT_ORDER
+
+
+def _clustering_output_paths(variant: str) -> tuple[Path, Path, Path]:
+    """Return report, PCA scatter, and scree plot paths for one clustering variant."""
+    return (
+        PROJECT_ROOT / "outputs" / f"clustering-{variant}.md",
+        PROJECT_ROOT / "outputs" / f"clustering-{variant}_pca_scatter.png",
+        PROJECT_ROOT / "outputs" / f"clustering-{variant}_scree_plot.png",
+    )
 
 
 def _load_train() -> tuple[pd.DataFrame, pd.Series]:
@@ -240,66 +248,71 @@ def main() -> None:
     print("=" * 60)
 
     print("=" * 60)
-    print("Clustering analysis — PCA + K-Means")
+    print("Clustering analysis variants — PCA + K-Means")
     print("=" * 60)
 
     # The clustering workflow is unsupervised; y is passed only for post-hoc interpretation.
-    species_results = run_species_clustering_analysis(X, y)
-    split_summary = ", ".join(
-        f"{species}={result.raw_shape[0]}" for species, result in species_results.items()
-    )
-    print(f"[1/4] Split by AnimalType -> {split_summary}")
-    print(
-        "[2/4] Species-specific preprocessing and PCA OK -> "
-        + ", ".join(
-            f"{species}: encoded={result.preprocessed_shape}, pca={result.pca_shape}"
-            for species, result in species_results.items()
+    for index, variant in enumerate(CLUSTERING_VARIANTS, start=1):
+        report_path, plot_output_path, scree_output_path = _clustering_output_paths(variant)
+        print("-" * 60)
+        print(f"[Variant {index}/{len(CLUSTERING_VARIANTS)}] Clustering {variant} analysis")
+
+        species_results = run_species_clustering_analysis(X, y, variant=variant)
+        split_summary = ", ".join(
+            f"{species}={result.raw_shape[0]}" for species, result in species_results.items()
         )
-    )
-    for species, result in species_results.items():
+        print(f"[1/4] Split by AnimalType -> {split_summary}")
         print(
-            f"[3/4] {species} KMeans selected K={result.selected_k}, "
-            f"silhouette={result.silhouette_sample:.4f}, "
-            f"inertia={result.inertia:.4f}"
+            "[2/4] Species-specific preprocessing and PCA OK -> "
+            + ", ".join(
+                f"{species}: encoded={result.preprocessed_shape}, pca={result.pca_shape}"
+                for species, result in species_results.items()
+            )
+        )
+        for species, result in species_results.items():
+            print(
+                f"[3/4] {species} KMeans selected K={result.selected_k}, "
+                f"silhouette={result.silhouette_sample:.4f}, "
+                f"inertia={result.inertia:.4f}"
+            )
+
+        # Plot generation is optional at runtime, but the markdown report is always written.
+        plot_path = None
+        plot_error = None
+        scree_plot_path = None
+        scree_plot_error = None
+        try:
+            plot_path = plot_species_cluster_scatters(species_results, plot_output_path)
+        except RuntimeError as exc:
+            plot_error = str(exc)
+        try:
+            scree_plot_path = plot_species_scree_plots(species_results, scree_output_path)
+        except RuntimeError as exc:
+            scree_plot_error = str(exc)
+
+        write_species_clustering_report(
+            results=species_results,
+            report_path=report_path,
+            plot_path=plot_path.relative_to(PROJECT_ROOT) if plot_path is not None else None,
+            plot_error=plot_error,
+            scree_plot_path=(
+                scree_plot_path.relative_to(PROJECT_ROOT) if scree_plot_path is not None else None
+            ),
+            scree_plot_error=scree_plot_error,
         )
 
-    # Plot generation is optional at runtime, but the markdown report is always written.
-    plot_path = None
-    plot_error = None
-    scree_plot_path = None
-    scree_plot_error = None
-    try:
-        plot_path = plot_species_cluster_scatters(species_results, CLUSTERING_PLOT_PATH)
-    except RuntimeError as exc:
-        plot_error = str(exc)
-    try:
-        scree_plot_path = plot_species_scree_plots(species_results, CLUSTERING_SCREE_PLOT_PATH)
-    except RuntimeError as exc:
-        scree_plot_error = str(exc)
-
-    write_species_clustering_report(
-        results=species_results,
-        report_path=CLUSTERING_REPORT_PATH,
-        plot_path=plot_path.relative_to(PROJECT_ROOT) if plot_path is not None else None,
-        plot_error=plot_error,
-        scree_plot_path=(
-            scree_plot_path.relative_to(PROJECT_ROOT) if scree_plot_path is not None else None
-        ),
-        scree_plot_error=scree_plot_error,
-    )
-
-    if plot_path is not None:
-        print(f"[4/4] Visualization written: {plot_path.relative_to(PROJECT_ROOT)}")
-    else:
-        print(f"[4/4] Visualization skipped: {plot_error}")
-    if scree_plot_path is not None:
-        print(f"      Scree plot written: {scree_plot_path.relative_to(PROJECT_ROOT)}")
-    else:
-        print(f"      Scree plot skipped: {scree_plot_error}")
+        if plot_path is not None:
+            print(f"[4/4] Visualization written: {plot_path.relative_to(PROJECT_ROOT)}")
+        else:
+            print(f"[4/4] Visualization skipped: {plot_error}")
+        if scree_plot_path is not None:
+            print(f"      Scree plot written: {scree_plot_path.relative_to(PROJECT_ROOT)}")
+        else:
+            print(f"      Scree plot skipped: {scree_plot_error}")
+        print(f"      Report written: {report_path.relative_to(PROJECT_ROOT)}")
 
     print("=" * 60)
-    print("Clustering analysis completed.")
-    print(f"Report written: {CLUSTERING_REPORT_PATH.relative_to(PROJECT_ROOT)}")
+    print("All clustering variants completed.")
     print("=" * 60)
 
 

@@ -224,6 +224,15 @@ data/*.csv
 outputs/clustering.md
 outputs/clustering_pca_scatter.png
 outputs/clustering_scree_plot.png
+outputs/clustering-v1.md
+outputs/clustering-v1_pca_scatter.png
+outputs/clustering-v1_scree_plot.png
+outputs/clustering-v2.md
+outputs/clustering-v2_pca_scatter.png
+outputs/clustering-v2_scree_plot.png
+outputs/clustering-v3.md
+outputs/clustering-v3_pca_scatter.png
+outputs/clustering-v3_scree_plot.png
 
 # IDE settings
 .vscode/

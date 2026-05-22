@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Union
 
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -22,6 +23,8 @@ DEFAULT_MIN_BREED_FREQUENCY = 0.01
 BREED_OTHER_LABEL = "Other"
 DEFAULT_TOP_K_COLORS = 15
 COLOR_OTHER_LABEL = "Other"
+AGE_GROUP_COLUMN = "age_group"
+AGE_GROUP_LABELS = ("baby", "young", "adult", "senior")
 TIME_FEATURE_COLUMNS = [
     "outcome_year",
     "outcome_month",
@@ -30,18 +33,95 @@ TIME_FEATURE_COLUMNS = [
     "outcome_is_weekend",
     "outcome_season",
 ]
+CLUSTERING_VARIANT_ORDER = ("v1", "v2", "v3")
 
-# Keep animal-state numerics only; calendar/time fields are excluded from clustering.
-CLUSTERING_NUMERIC_COLUMNS = [
-    column for column in ENGINEERED_NUMERIC_COLUMNS if column not in TIME_FEATURE_COLUMNS
-]
-# Keep animal-descriptor categoricals only; calendar/time fields are excluded from clustering.
-CLUSTERING_CATEGORICAL_COLUMNS = [
-    column for column in ENGINEERED_CATEGORICAL_COLUMNS if column not in TIME_FEATURE_COLUMNS
-]
-SPECIES_SPECIFIC_CATEGORICAL_COLUMNS = [
-    column for column in CLUSTERING_CATEGORICAL_COLUMNS if column != "animal_type"
-]
+
+@dataclass(frozen=True)
+class ClusteringVariant:
+    """Feature-set switch for comparable clustering experiments."""
+
+    name: str
+    title: str
+    description: str
+    use_age_days: bool
+    use_age_group: bool
+    use_color: bool
+
+
+CLUSTERING_VARIANTS = {
+    "v1": ClusteringVariant(
+        name="v1",
+        title="Clustering V1",
+        description="Uses numeric age_days and top primary_color levels.",
+        use_age_days=True,
+        use_age_group=False,
+        use_color=True,
+    ),
+    "v2": ClusteringVariant(
+        name="v2",
+        title="Clustering V2",
+        description="Removes color and replaces numeric age_days with age_group.",
+        use_age_days=False,
+        use_age_group=True,
+        use_color=False,
+    ),
+    "v3": ClusteringVariant(
+        name="v3",
+        title="Clustering V3",
+        description="Removes both age and color from clustering inputs.",
+        use_age_days=False,
+        use_age_group=False,
+        use_color=False,
+    ),
+}
+
+
+def get_clustering_variant(variant: Union[str, ClusteringVariant]) -> ClusteringVariant:
+    """Resolve a variant name to a feature-set configuration."""
+    if isinstance(variant, ClusteringVariant):
+        return variant
+    key = str(variant).lower()
+    if key not in CLUSTERING_VARIANTS:
+        valid = ", ".join(CLUSTERING_VARIANT_ORDER)
+        raise ValueError(f"Unknown clustering variant '{variant}'. Expected one of: {valid}.")
+    return CLUSTERING_VARIANTS[key]
+
+
+def get_clustering_columns(
+    variant: Union[str, ClusteringVariant] = "v3",
+    include_animal_type: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Return numeric and categorical columns for a clustering feature-set variant."""
+    spec = get_clustering_variant(variant)
+
+    numeric_columns = [
+        column for column in ENGINEERED_NUMERIC_COLUMNS if column not in TIME_FEATURE_COLUMNS
+    ]
+    if not spec.use_age_days:
+        numeric_columns = [column for column in numeric_columns if column != "age_days"]
+
+    categorical_columns = [
+        column for column in ENGINEERED_CATEGORICAL_COLUMNS if column not in TIME_FEATURE_COLUMNS
+    ]
+    if not spec.use_color:
+        categorical_columns = [
+            column for column in categorical_columns if column != "primary_color"
+        ]
+    if spec.use_age_group:
+        categorical_columns = [*categorical_columns, AGE_GROUP_COLUMN]
+    if not include_animal_type:
+        categorical_columns = [
+            column for column in categorical_columns if column != "animal_type"
+        ]
+
+    return numeric_columns, categorical_columns
+
+
+# Backward-compatible defaults point at the final v3 feature set.
+CLUSTERING_NUMERIC_COLUMNS, CLUSTERING_CATEGORICAL_COLUMNS = get_clustering_columns("v3")
+SPECIES_SPECIFIC_NUMERIC_COLUMNS, SPECIES_SPECIFIC_CATEGORICAL_COLUMNS = (
+    get_clustering_columns("v3", include_animal_type=False)
+)
 
 
 class _FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
@@ -66,16 +146,38 @@ class NeuterStatusGrouper(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        if "neuter_status" not in X.columns:
-            raise ValueError("NeuterStatusGrouper expects 'neuter_status' in input frame.")
+        return group_neuter_status_feature(X)
 
-        result = X.copy()
-        result["neuter_status"] = result["neuter_status"].replace(
-            {
-                "Spayed": "Neutered",
-            }
-        )
-        return result
+
+def group_neuter_status_feature(X: pd.DataFrame) -> pd.DataFrame:
+    """Map sex-specific sterilization labels to one clustering status column."""
+    if "neuter_status" not in X.columns:
+        raise ValueError("group_neuter_status_feature expects 'neuter_status' in input frame.")
+
+    result = X.copy()
+    result["neuter_status"] = result["neuter_status"].replace(
+        {
+            "Spayed": "Neutered",
+        }
+    )
+    return result
+
+
+def add_age_group_feature(X: pd.DataFrame) -> pd.DataFrame:
+    """Convert continuous age_days into interpretable shelter-life-stage groups."""
+    if "age_days" not in X.columns:
+        raise ValueError("add_age_group_feature expects 'age_days' in input frame.")
+
+    result = X.copy()
+    age_days = pd.to_numeric(result["age_days"], errors="coerce")
+
+    # Simple fixed bins keep cluster profiles explainable across both species.
+    result[AGE_GROUP_COLUMN] = pd.cut(
+        age_days,
+        bins=[float("-inf"), 180.0, 730.0, 2555.0, float("inf")],
+        labels=AGE_GROUP_LABELS,
+    ).astype("object")
+    return result
 
 
 class BreedFrequencyEncoder(BaseEstimator, TransformerMixin):
@@ -126,6 +228,16 @@ class BreedFrequencyEncoder(BaseEstimator, TransformerMixin):
         return result
 
 
+class AgeGroupTransformer(BaseEstimator, TransformerMixin):
+    """Add baby/young/adult/senior age groups when a variant uses categorical age."""
+
+    def fit(self, X: pd.DataFrame, y: Any = None) -> "AgeGroupTransformer":
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        return add_age_group_feature(X)
+
+
 class TopKColorEncoder(BaseEstimator, TransformerMixin):
     """Keep the most common primary colors and group all remaining colors as Other."""
 
@@ -163,24 +275,26 @@ class TopKColorEncoder(BaseEstimator, TransformerMixin):
         return result
 
 
-def build_clustering_preprocessor(include_animal_type: bool = True) -> ColumnTransformer:
+def build_clustering_preprocessor(
+    include_animal_type: bool = True,
+    variant: Union[str, ClusteringVariant] = "v3",
+) -> ColumnTransformer:
     """Impute, scale numerics, and one-hot categoricals — no target encoding step.
 
     Differences from classification build_column_preprocessor():
-    - Numeric columns: animal-state numerics only; DateTime-derived fields are excluded.
-    - Categorical columns: animal descriptors only, including primary_breed.
+    - Numeric/categorical columns are selected by v1/v2/v3 feature-set variant.
+    - DateTime-derived fields are excluded from all clustering variants.
     - Scaler: RobustScaler (classification uses StandardScaler).
     - Imputation / OneHot settings are the same (median, most_frequent, ignore unknown).
     """
-    categorical_columns = (
-        CLUSTERING_CATEGORICAL_COLUMNS
-        if include_animal_type
-        else SPECIES_SPECIFIC_CATEGORICAL_COLUMNS
+    numeric_columns, categorical_columns = get_clustering_columns(
+        variant=variant,
+        include_animal_type=include_animal_type,
     )
     numeric_pipeline = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
-            # Robust to outliers in age_days — important for distance-based clustering.
+            # Robust to age outliers in v1 and harmless for binary numeric flags in v2/v3.
             ("scaler", RobustScaler()),
         ]
     )
@@ -192,7 +306,7 @@ def build_clustering_preprocessor(include_animal_type: bool = True) -> ColumnTra
     )
     return ColumnTransformer(
         transformers=[
-            ("numeric", numeric_pipeline, CLUSTERING_NUMERIC_COLUMNS),
+            ("numeric", numeric_pipeline, numeric_columns),
             ("categorical", categorical_pipeline, categorical_columns),
         ],
         remainder="drop",
@@ -204,24 +318,38 @@ def build_clustering_pipeline(
     min_breed_frequency: float = DEFAULT_MIN_BREED_FREQUENCY,
     top_k_colors: int = DEFAULT_TOP_K_COLORS,
     include_animal_type: bool = True,
+    variant: Union[str, ClusteringVariant] = "v3",
 ) -> Pipeline:
     """Unsupervised preprocessing: feature engineering -> rare-breed grouping -> encode.
 
     Differences from classification build_preprocessing_pipeline():
     - No BreedTargetEncoder and no OutcomeType (y) at fit time.
     - Spayed and Neutered are grouped only for clustering, after shared feature engineering.
+    - Age and color handling are selected by the requested v1/v2/v3 variant.
     - Breeds below the configured frequency threshold are grouped as Other.
-    - Only the most frequent primary colors are retained; the rest are grouped as Other.
     - DateTime-derived fields are excluded so clusters focus on animal profiles.
     - PCA is applied in src.clustering.analysis, after this reusable preprocessing step.
     - For Cat/Dog-specific runs, animal_type is used as the filter and excluded as a feature.
     """
+    spec = get_clustering_variant(variant)
+    steps: list[tuple[str, object]] = [
+        ("feature_engineering", _FeatureEngineeringTransformer()),
+        ("neuter_status_grouper", NeuterStatusGrouper()),
+    ]
+    if spec.use_age_group:
+        steps.append(("age_group", AgeGroupTransformer()))
+    steps.append(("breed_frequency", BreedFrequencyEncoder(min_frequency=min_breed_frequency)))
+    if spec.use_color:
+        steps.append(("color_top_k", TopKColorEncoder(top_k=top_k_colors)))
+    steps.append(
+        (
+            "preprocessor",
+            build_clustering_preprocessor(
+                include_animal_type=include_animal_type,
+                variant=spec,
+            ),
+        )
+    )
     return Pipeline(
-        steps=[
-            ("feature_engineering", _FeatureEngineeringTransformer()),
-            ("neuter_status_grouper", NeuterStatusGrouper()),
-            ("breed_frequency", BreedFrequencyEncoder(min_frequency=min_breed_frequency)),
-            ("color_top_k", TopKColorEncoder(top_k=top_k_colors)),
-            ("preprocessor", build_clustering_preprocessor(include_animal_type)),
-        ]
+        steps=steps
     )

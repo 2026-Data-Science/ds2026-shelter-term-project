@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from tempfile import gettempdir
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Union
 import warnings
 
 # KMeans/joblib can emit noisy physical-core detection warnings on some macOS shells.
@@ -24,7 +24,13 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 
 from src.classification.features import LABEL_ORDER, engineer_features
-from src.clustering.preprocessing import build_clustering_pipeline
+from src.clustering.preprocessing import (
+    ClusteringVariant,
+    add_age_group_feature,
+    build_clustering_pipeline,
+    get_clustering_variant,
+    group_neuter_status_feature,
+)
 
 
 DEFAULT_K_RANGE = (2, 3, 4, 5, 6)
@@ -38,6 +44,7 @@ DEFAULT_SPECIES_ORDER = ("Cat", "Dog")
 class ClusteringAnalysisResult:
     """Container for the clustering model, evaluation tables, and plot-ready PCA data."""
 
+    variant: ClusteringVariant
     segment_name: str
     raw_shape: tuple[int, int]
     preprocessed_shape: tuple[int, int]
@@ -135,9 +142,12 @@ def _summarize_clusters(
     raw_features: pd.DataFrame,
     labels: np.ndarray,
     y: Optional[pd.Series],
+    variant: ClusteringVariant,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create human-readable cluster profiles without using labels for model fitting."""
-    engineered = engineer_features(raw_features).copy()
+    engineered = add_age_group_feature(
+        group_neuter_status_feature(engineer_features(raw_features))
+    ).copy()
     engineered["cluster"] = labels
 
     rows: list[dict[str, object]] = []
@@ -158,12 +168,14 @@ def _summarize_clusters(
                     float(subset["is_mixed_breed"].mean()) * 100.0
                 ),
                 "top_animal_type": _top_value(subset["animal_type"]),
+                "top_age_group": _top_value(subset["age_group"]),
+                "top_sex": _top_value(subset["sex"]),
                 "top_breed": _top_value(subset["primary_breed"]),
-                "top_color": _top_value(subset["primary_color"]),
                 "top_neuter_status": _top_value(subset["neuter_status"]),
-                "top_season": _top_value(subset["outcome_season"]),
             }
         )
+        if variant.use_color:
+            rows[-1]["top_color"] = _top_value(subset["primary_color"])
     cluster_summary = pd.DataFrame(rows)
 
     if y is None:
@@ -272,9 +284,14 @@ def run_clustering_analysis(
     random_state: int = DEFAULT_RANDOM_STATE,
     segment_name: str = "All animals",
     include_animal_type: bool = True,
+    variant: Union[str, ClusteringVariant] = "v3",
 ) -> ClusteringAnalysisResult:
     """Run clustering preprocessing, PCA feature reduction, K selection, and K-Means."""
-    preprocessing_pipeline = build_clustering_pipeline(include_animal_type=include_animal_type)
+    spec = get_clustering_variant(variant)
+    preprocessing_pipeline = build_clustering_pipeline(
+        include_animal_type=include_animal_type,
+        variant=spec,
+    )
     preprocessed = _as_dense_array(preprocessing_pipeline.fit_transform(raw_features))
 
     # Fit full PCA once so the scree plot and the reduced matrix use the same decomposition.
@@ -302,7 +319,12 @@ def run_clustering_analysis(
         "silhouette_sample",
     ].iloc[0]
 
-    cluster_summary, outcome_distribution = _summarize_clusters(raw_features, labels, y)
+    cluster_summary, outcome_distribution = _summarize_clusters(
+        raw_features,
+        labels,
+        y,
+        spec,
+    )
     coordinates = _build_coordinate_frame(reduced, labels)
     centers = pd.DataFrame(
         {
@@ -316,9 +338,14 @@ def run_clustering_analysis(
         }
     )
     top_breeds = sorted(preprocessing_pipeline.named_steps["breed_frequency"].retained_breeds_)
-    top_colors = sorted(preprocessing_pipeline.named_steps["color_top_k"].retained_colors_)
+    top_colors = (
+        sorted(preprocessing_pipeline.named_steps["color_top_k"].retained_colors_)
+        if spec.use_color
+        else []
+    )
 
     return ClusteringAnalysisResult(
+        variant=spec,
         segment_name=segment_name,
         raw_shape=raw_features.shape,
         preprocessed_shape=preprocessed.shape,
@@ -348,8 +375,10 @@ def run_species_clustering_analysis(
     pca_variance: float = DEFAULT_PCA_VARIANCE,
     silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
     random_state: int = DEFAULT_RANDOM_STATE,
+    variant: Union[str, ClusteringVariant] = "v3",
 ) -> dict[str, ClusteringAnalysisResult]:
     """Run the full clustering workflow separately for each AnimalType subset."""
+    spec = get_clustering_variant(variant)
     results: dict[str, ClusteringAnalysisResult] = {}
     for species in _ordered_animal_types(raw_features):
         mask = raw_features["AnimalType"].astype(str) == species
@@ -366,6 +395,7 @@ def run_species_clustering_analysis(
             random_state=random_state,
             segment_name=species,
             include_animal_type=False,
+            variant=spec,
         )
     return results
 
@@ -484,7 +514,8 @@ def plot_species_cluster_scatters(
         ax.grid(alpha=0.2)
         fig.colorbar(scatter, ax=ax, label="Cluster")
 
-    fig.suptitle("Species-Specific K-Means Clusters Projected onto PCA Components")
+    variant_title = next(iter(results.values())).variant.title
+    fig.suptitle(f"Species-Specific {variant_title} K-Means Clusters Projected onto PCA Components")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -561,7 +592,8 @@ def plot_species_scree_plots(
             bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85},
         )
 
-    fig.suptitle("Species-Specific PCA Scree Plots")
+    variant_title = next(iter(results.values())).variant.title
+    fig.suptitle(f"Species-Specific {variant_title} PCA Scree Plots")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -612,7 +644,8 @@ def _append_result_sections(lines: list[str], result: ClusteringAnalysisResult) 
     lines.append(f"- Final inertia: **{result.inertia:.4f}**")
     lines.append(f"- Sampled silhouette score: **{result.silhouette_sample:.4f}**")
     lines.append(f"- Retained breed levels: {len(result.top_breeds)}")
-    lines.append(f"- Retained color levels: {len(result.top_colors)}")
+    if result.variant.use_color:
+        lines.append(f"- Retained color levels: {len(result.top_colors)}")
     lines.append("")
     lines.append("#### K Selection")
     lines.append("")
@@ -629,6 +662,42 @@ def _append_result_sections(lines: list[str], result: ClusteringAnalysisResult) 
         lines.append("")
 
 
+def _variant_pipeline_lines(variant: ClusteringVariant, species_specific: bool) -> list[str]:
+    """Describe the selected clustering feature set for markdown reports."""
+    lines: list[str] = []
+    if species_specific:
+        lines.append("- Split raw data by `AnimalType` (`Cat`, `Dog`)")
+        lines.append("- Run feature engineering independently inside each species subset")
+        lines.append("- Exclude `animal_type` from clustering features because it is constant after filtering")
+    else:
+        lines.append("- Raw input: shelter animal feature columns only")
+
+    if variant.use_age_days:
+        lines.append("- Age handling: use numeric `age_days` as a clustering feature")
+    elif variant.use_age_group:
+        lines.append("- Age handling: replace numeric `age_days` with `baby`, `young`, `adult`, or `senior`")
+    else:
+        lines.append("- Age handling: do not use `age_days` or `age_group` to fit clusters")
+        lines.append("- Age values shown in cluster profiles are post-hoc descriptors only")
+
+    frequency_scope = "per species" if species_specific else "in the fitted data"
+    lines.append(
+        f"- Breed reduction: keep `primary_breed` values at or above 1% frequency {frequency_scope} and group the rest as `Other`"
+    )
+    if variant.use_color:
+        lines.append(
+            f"- Color handling: keep the top 15 `primary_color` values {frequency_scope} and group the rest as `Other`"
+        )
+    else:
+        lines.append(f"- Color exclusion: do not use `primary_color` in clustering {variant.name}")
+    lines.append("- Numeric preprocessing: median imputation and RobustScaler")
+    lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
+    lines.append("- PCA: retain at least 95% of variance before K-Means")
+    model_scope = " per species" if species_specific else ""
+    lines.append(f"- Model: K-Means, selected by sampled silhouette score over K=2..6{model_scope}")
+    return lines
+
+
 def write_clustering_report(
     result: ClusteringAnalysisResult,
     report_path: Path,
@@ -637,29 +706,25 @@ def write_clustering_report(
 ) -> Path:
     """Write the clustering process, PCA reduction, metrics, and interpretation to markdown."""
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    variant = result.variant
 
     lines: list[str] = []
-    lines.append("# Clustering Report")
+    lines.append(f"# {variant.title} Report")
     lines.append("")
     lines.append("## Purpose")
     lines.append("")
     lines.append(
-        "This report runs only the unsupervised clustering workflow: preprocessing, "
+        f"This report runs the {variant.name} unsupervised clustering workflow: preprocessing, "
         "PCA feature reduction, K-Means analysis, and cluster interpretation."
     )
+    lines.append("")
+    lines.append(f"Feature set: {variant.description}")
     lines.append("")
     lines.append("`OutcomeType` is not used to fit clusters; it is shown only after clustering for interpretation.")
     lines.append("")
     lines.append("## Pipeline")
     lines.append("")
-    lines.append("- Raw input: shelter animal feature columns only")
-    lines.append("- Feature engineering: age, date/time, sex/neuter status, breed, color, and name signals")
-    lines.append("- Breed reduction: keep `primary_breed` values at or above 1% frequency and group the rest as `Other`")
-    lines.append("- Color reduction: keep the top 15 `primary_color` values and group the rest as `Other`")
-    lines.append("- Numeric preprocessing: median imputation and RobustScaler")
-    lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
-    lines.append("- PCA: retain at least 95% of variance before K-Means")
-    lines.append("- Model: K-Means, selected by sampled silhouette score over K=2..6")
+    lines.extend(_variant_pipeline_lines(variant, species_specific=False))
     lines.append("")
     lines.append("## Shape And Reduction")
     lines.append("")
@@ -722,31 +787,28 @@ def write_species_clustering_report(
 ) -> Path:
     """Write a Cat/Dog-separated clustering report with PCA metrics and interpretation."""
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    if not results:
+        raise ValueError("No clustering results were provided for reporting.")
+    variant = next(iter(results.values())).variant
 
     lines: list[str] = []
-    lines.append("# Species-Specific Clustering Report")
+    lines.append(f"# Species-Specific {variant.title} Report")
     lines.append("")
     lines.append("## Purpose")
     lines.append("")
     lines.append(
-        "This report runs the unsupervised clustering workflow separately for each "
+        f"This report runs the {variant.name} unsupervised clustering workflow separately for each "
         "`AnimalType` subset. Cats and dogs are filtered first because species can "
         "dominate distance-based clustering when they are mixed in one K-Means run."
     )
+    lines.append("")
+    lines.append(f"Feature set: {variant.description}")
     lines.append("")
     lines.append("`OutcomeType` is not used to fit clusters; it is shown only after clustering for interpretation.")
     lines.append("")
     lines.append("## Pipeline")
     lines.append("")
-    lines.append("- Split raw data by `AnimalType` (`Cat`, `Dog`)")
-    lines.append("- Run feature engineering independently inside each species subset")
-    lines.append("- Exclude `animal_type` from clustering features because it is constant after filtering")
-    lines.append("- Breed reduction: keep `primary_breed` values at or above 1% frequency per species and group the rest as `Other`")
-    lines.append("- Color reduction: keep the top 15 `primary_color` values per species and group the rest as `Other`")
-    lines.append("- Numeric preprocessing: median imputation and RobustScaler")
-    lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
-    lines.append("- PCA: retain at least 95% of variance before K-Means")
-    lines.append("- Model: K-Means, selected by sampled silhouette score over K=2..6 per species")
+    lines.extend(_variant_pipeline_lines(variant, species_specific=True))
     lines.append("")
     lines.append("## Species Results")
     lines.append("")
