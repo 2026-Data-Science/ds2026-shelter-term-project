@@ -1,7 +1,7 @@
 import pandas as pd
 
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, f1_score
@@ -50,21 +50,62 @@ models = {
     )
 }
 
+param_grids = {
+    "DummyClassifier": {},
+
+    "LogisticRegression": {
+        "classifier__C": [0.1, 1, 10],
+        "classifier__class_weight": [None, "balanced"],
+    },
+
+    "RandomForest": {
+        "classifier__n_estimators": [100, 200, 300],
+        "classifier__max_depth": [None, 10, 20],
+        "classifier__min_samples_split": [2, 5],
+        "classifier__min_samples_leaf": [1, 2],
+        "classifier__class_weight": [None, "balanced"],
+    }
+}
+
 results = []
+best_models = {}
 
 for model_name, classifier in models.items():
     print("=" * 60)
-    print(f"Training {model_name}...")
+    print(f"Tuning {model_name}...")
 
     model = Pipeline([
         ("preprocessing", build_preprocessing_pipeline()),
         ("classifier", classifier)
     ])
 
-    model.fit(X_train, y_train)
+    # DummyClassifier는 튜닝할 파라미터가 없으므로 그냥 fit
+    if not param_grids[model_name]:
+        model.fit(X_train, y_train)
+        best_model = model
+        best_params = "No tuning"
+    else:
+        grid_search = GridSearchCV(
+            estimator=model,
+            param_grid=param_grids[model_name],
+            scoring="f1_macro",
+            cv=5,
+            n_jobs=-1,
+            verbose=2
+        )
 
-    print(f"Predicting with {model_name}...")
-    pred = model.predict(X_test)
+        grid_search.fit(X_train, y_train)
+
+        best_model = grid_search.best_estimator_
+        best_params = grid_search.best_params_
+
+        print(f"Best params: {best_params}")
+        print(f"Best CV Macro F1: {grid_search.best_score_:.4f}")
+
+    best_models[model_name] = best_model
+
+    print(f"Predicting with best {model_name}...")
+    pred = best_model.predict(X_test)
 
     accuracy = accuracy_score(y_test, pred)
     macro_f1 = f1_score(y_test, pred, average="macro")
@@ -72,13 +113,17 @@ for model_name, classifier in models.items():
 
     results.append({
         "model": model_name,
-        "accuracy": accuracy,
-        "macro_f1": macro_f1,
-        "weighted_f1": weighted_f1,
+        "best_params": best_params,
+        "test_accuracy": accuracy,
+        "test_macro_f1": macro_f1,
+        "test_weighted_f1": weighted_f1,
     })
 
     print(classification_report(y_test, pred))
 
 print("=" * 60)
-print("Model Comparison")
-print(pd.DataFrame(results))
+print("Tuned Model Comparison")
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_colwidth", None)
+
+print(pd.DataFrame(results).to_string())
