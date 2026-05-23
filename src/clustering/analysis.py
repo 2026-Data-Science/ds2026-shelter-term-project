@@ -4,10 +4,32 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from tempfile import gettempdir
-from typing import Iterable, Optional, Union
+from typing import Optional
 import warnings
 
-# KMeans/joblib can emit noisy physical-core detection warnings on some macOS shells.
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+
+from src.clustering.preprocessing import (
+    BREED_MIN_SPECIES_RATIO,
+    CATEGORICAL_FEATURES,
+    ENRICHED_TRAIN_PATH,
+    LOS_LABELS,
+    NUMERIC_FEATURES,
+    PROFILE_ONLY_FEATURES,
+    PROJECT_ROOT,
+    TRAIN_CSV,
+    build_long_stay_clustering_frame,
+    build_long_stay_preprocessor,
+    build_train_with_latest_intake,
+    find_intake_csv,
+    validate_columns,
+)
+
+
 if "LOKY_MAX_CPU_COUNT" not in os.environ:
     os.environ["LOKY_MAX_CPU_COUNT"] = str(max(1, (os.cpu_count() or 2) - 1))
 warnings.filterwarnings(
@@ -17,64 +39,41 @@ warnings.filterwarnings(
     module="joblib.externals.loky.backend.context",
 )
 
-import numpy as np
-import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
-
-from src.classification.features import LABEL_ORDER, engineer_features
-from src.clustering.preprocessing import (
-    ClusteringVariant,
-    add_age_group_feature,
-    build_clustering_pipeline,
-    get_clustering_variant,
-    group_neuter_status_feature,
-)
-
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / "long_stay_risk_clustering"
+REPORT_PATH = OUTPUT_DIR / "long_stay_risk_clustering_report.md"
+PCA_SCATTER_FILENAME = "long_stay_cluster_pca_scatter.png"
+DURATION_BOXPLOT_FILENAME = "duration_by_cluster_boxplot.png"
+DURATION_BINS_FILENAME = "duration_bins_by_cluster.png"
 
 DEFAULT_K_RANGE = (2, 3, 4, 5, 6)
-DEFAULT_PCA_VARIANCE = 0.95
 DEFAULT_RANDOM_STATE = 42
+DEFAULT_PCA_VARIANCE = 0.95
 DEFAULT_SILHOUETTE_SAMPLE_SIZE = 3000
-DEFAULT_SPECIES_ORDER = ("Cat", "Dog")
 
 
 @dataclass
-class ClusteringAnalysisResult:
-    """Container for the clustering model, evaluation tables, and plot-ready PCA data."""
+class SpeciesLongStayClusteringResult:
+    """Container for one species-specific long-stay risk clustering run."""
 
-    variant: ClusteringVariant
-    segment_name: str
+    species: str
     raw_shape: tuple[int, int]
-    preprocessed_shape: tuple[int, int]
+    feature_shape: tuple[int, int]
+    encoded_shape: tuple[int, int]
     pca_shape: tuple[int, int]
-    pca_variance_threshold: float
     pca_explained_variance: float
-    pca_first_two_variance: float
-    pca_elbow_component: int
-    pca_scree: pd.DataFrame
     selected_k: int
-    inertia: float
     silhouette_sample: float
-    top_breeds: list[str]
-    top_colors: list[str]
     candidate_scores: pd.DataFrame
-    cluster_summary: pd.DataFrame
-    outcome_distribution: pd.DataFrame
+    cluster_profile: pd.DataFrame
+    duration_bin_profile: pd.DataFrame
+    outcome_profile: pd.DataFrame
+    feature_separation: pd.DataFrame
     pca_coordinates: pd.DataFrame
     cluster_centers_2d: pd.DataFrame
 
 
-def _as_dense_array(matrix: object) -> np.ndarray:
-    """Convert sklearn outputs to a dense float array before PCA and K-Means."""
-    if hasattr(matrix, "toarray"):
-        matrix = matrix.toarray()
-    return np.asarray(matrix, dtype=np.float64)
-
-
 def _top_value(series: pd.Series) -> str:
-    """Return the most common category with its within-cluster percentage."""
+    """Return the most common value with its within-cluster percentage."""
     cleaned = series.fillna("Unknown").astype(str)
     if cleaned.empty:
         return "Unknown (0.0%)"
@@ -85,414 +84,263 @@ def _top_value(series: pd.Series) -> str:
 
 
 def _format_percent(value: float) -> str:
-    """Format a numeric ratio as a compact percentage string for reports."""
+    """Format a ratio already expressed as 0-100 as a percentage string."""
     return f"{value:.2f}%"
 
 
-def _choose_best_k(candidate_scores: pd.DataFrame) -> int:
-    """Pick the K with the highest sampled silhouette score, preferring smaller K on ties."""
-    ordered = candidate_scores.sort_values(
-        by=["silhouette_sample", "k"],
-        ascending=[False, True],
-    )
-    return int(ordered.iloc[0]["k"])
+def _as_dense(matrix: object) -> np.ndarray:
+    """Convert sklearn matrix outputs to dense float arrays for PCA/K-Means."""
+    if hasattr(matrix, "toarray"):
+        matrix = matrix.toarray()
+    return np.asarray(matrix, dtype=np.float64)
 
 
-def _score_kmeans_candidates(
-    reduced: np.ndarray,
-    k_range: Iterable[int],
-    silhouette_sample_size: int,
-    random_state: int,
-) -> pd.DataFrame:
-    """Evaluate candidate K values with inertia and sampled silhouette score."""
+def _markdown_value(value: object) -> str:
+    """Format values for compact markdown tables without optional dependencies."""
+    if isinstance(value, (float, np.floating)):
+        if np.isnan(value):
+            return ""
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _markdown_table(frame: pd.DataFrame) -> str:
+    """Render a DataFrame as a GitHub-flavoured markdown table."""
+    if frame.empty:
+        return "_No data available._"
+    headers = [str(column) for column in frame.columns]
+    rows = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for _, row in frame.iterrows():
+        rows.append("| " + " | ".join(_markdown_value(value) for value in row) + " |")
+    return "\n".join(rows)
+
+
+def _select_pca_components(explained: np.ndarray) -> int:
+    """Choose the smallest PCA component count that reaches the variance threshold."""
+    cumulative = np.cumsum(explained)
+    return int(np.searchsorted(cumulative, DEFAULT_PCA_VARIANCE, side="left") + 1)
+
+
+def _score_kmeans(reduced: np.ndarray) -> pd.DataFrame:
+    """Grid-search K=2..6 with sampled silhouette score."""
     rows: list[dict[str, float]] = []
-    sample_size: Optional[int]
-    if len(reduced) > silhouette_sample_size:
-        sample_size = silhouette_sample_size
-    else:
-        sample_size = None
-
-    for k in k_range:
-        if k < 2:
-            raise ValueError("KMeans clustering needs k >= 2.")
-        if k >= len(reduced):
-            raise ValueError("KMeans k must be smaller than the number of rows.")
-
-        # K-Means is fit on PCA-reduced features so distance calculations are less noisy.
-        model = KMeans(n_clusters=k, random_state=random_state, n_init=20)
+    sample_size: Optional[int] = (
+        DEFAULT_SILHOUETTE_SAMPLE_SIZE if len(reduced) > DEFAULT_SILHOUETTE_SAMPLE_SIZE else None
+    )
+    for k in DEFAULT_K_RANGE:
+        model = KMeans(n_clusters=k, random_state=DEFAULT_RANDOM_STATE, n_init=20)
         labels = model.fit_predict(reduced)
         score = silhouette_score(
             reduced,
             labels,
             sample_size=sample_size,
-            random_state=random_state,
+            random_state=DEFAULT_RANDOM_STATE,
         )
-        rows.append(
-            {
-                "k": int(k),
-                "inertia": float(model.inertia_),
-                "silhouette_sample": float(score),
-            }
-        )
-
+        rows.append({"k": int(k), "inertia": float(model.inertia_), "silhouette_sample": float(score)})
     return pd.DataFrame(rows)
 
 
-def _summarize_clusters(
-    raw_features: pd.DataFrame,
+def _rank_feature_separation(
+    encoded: np.ndarray,
+    encoded_feature_names: list[str],
     labels: np.ndarray,
-    y: Optional[pd.Series],
-    variant: ClusteringVariant,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Create human-readable cluster profiles without using labels for model fitting."""
-    engineered = add_age_group_feature(
-        group_neuter_status_feature(engineer_features(raw_features))
-    ).copy()
-    engineered["cluster"] = labels
+) -> pd.DataFrame:
+    """Rank input columns by how strongly their encoded values vary across clusters."""
+    global_mean = encoded.mean(axis=0)
+    total_ss = ((encoded - global_mean) ** 2).sum(axis=0)
+    between_ss = np.zeros(encoded.shape[1], dtype=float)
+    for cluster in sorted(np.unique(labels)):
+        mask = labels == cluster
+        cluster_mean = encoded[mask].mean(axis=0)
+        between_ss += mask.sum() * ((cluster_mean - global_mean) ** 2)
 
+    encoded_scores = np.divide(
+        between_ss,
+        total_ss,
+        out=np.zeros_like(between_ss),
+        where=total_ss > 0,
+    )
     rows: list[dict[str, object]] = []
-    total = len(engineered)
-    for cluster_id in sorted(engineered["cluster"].unique()):
-        subset = engineered[engineered["cluster"] == cluster_id]
-        count = len(subset)
-        median_age_days = float(subset["age_days"].median())
+    for feature in NUMERIC_FEATURES + CATEGORICAL_FEATURES:
+        if feature in NUMERIC_FEATURES:
+            indexes = [index for index, name in enumerate(encoded_feature_names) if name == feature]
+        else:
+            prefix = f"{feature}_"
+            indexes = [
+                index for index, name in enumerate(encoded_feature_names) if name.startswith(prefix)
+            ]
+        rows.append(
+            {
+                "feature": feature,
+                "separation_score": round(float(encoded_scores[indexes].sum()), 4) if indexes else 0.0,
+                "avg_encoded_eta2": round(float(encoded_scores[indexes].mean()), 4) if indexes else 0.0,
+                "encoded_columns": int(len(indexes)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("separation_score", ascending=False).reset_index(drop=True)
+
+
+def _profile_clusters(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Profile clusters with post-hoc breed/color/mix, duration, and outcome distributions."""
+    rows: list[dict[str, object]] = []
+    total = len(frame)
+    for cluster_id in sorted(frame["cluster"].unique()):
+        subset = frame[frame["cluster"] == cluster_id]
+        duration = subset["length_of_stay_days"]
         rows.append(
             {
                 "cluster": int(cluster_id),
-                "count": int(count),
-                "ratio": _format_percent(count / total * 100.0),
-                "median_age_days": round(median_age_days, 1),
-                "median_age_years": round(median_age_days / 365.0, 2),
-                "has_name": _format_percent(float(subset["has_name"].mean()) * 100.0),
-                "mixed_breed": _format_percent(
-                    float(subset["is_mixed_breed"].mean()) * 100.0
-                ),
-                "top_animal_type": _top_value(subset["animal_type"]),
-                "top_age_group": _top_value(subset["age_group"]),
+                "count": int(len(subset)),
+                "ratio": _format_percent(len(subset) / total * 100.0),
+                "top_intake_type": _top_value(subset["intake_type"]),
+                "top_condition": _top_value(subset["intake_condition"]),
+                "top_age_group": _top_value(subset["intake_age_group"]),
                 "top_sex": _top_value(subset["sex"]),
-                "top_breed": _top_value(subset["primary_breed"]),
                 "top_neuter_status": _top_value(subset["neuter_status"]),
+                "has_name": _format_percent(float(subset["has_name"].mean()) * 100.0),
+                "top_breed": _top_value(subset["primary_breed"]),
+                "top_color": _top_value(subset["primary_color"]),
+                "mixed_breed": _format_percent(float(subset["is_mixed_breed"].mean()) * 100.0),
+                "duration_mean_days": round(float(duration.mean()), 2),
+                "duration_median_days": round(float(duration.median()), 2),
+                "duration_p75_days": round(float(duration.quantile(0.75)), 2),
+                "duration_p90_days": round(float(duration.quantile(0.90)), 2),
+                "long_stay_30": _format_percent(float(subset["long_stay_30"].mean()) * 100.0),
+                "long_stay_60": _format_percent(float(subset["long_stay_60"].mean()) * 100.0),
+                "long_stay_90": _format_percent(float(subset["long_stay_90"].mean()) * 100.0),
+                "top_duration_category": _top_value(subset["duration_category"]),
             }
         )
-        if variant.use_color:
-            rows[-1]["top_color"] = _top_value(subset["primary_color"])
-    cluster_summary = pd.DataFrame(rows)
+    profile = pd.DataFrame(rows)
 
-    if y is None:
-        return cluster_summary, pd.DataFrame()
+    bin_profile = pd.crosstab(
+        frame["cluster"],
+        frame["duration_category"],
+        normalize="index",
+    ).mul(100.0)
+    bin_profile = bin_profile.reindex(columns=LOS_LABELS, fill_value=0.0).reset_index()
 
-    # OutcomeType is used only after clustering to interpret groups, never as input.
-    outcome_frame = pd.DataFrame(
-        {
-            "cluster": labels,
-            "OutcomeType": y.reset_index(drop=True),
-        }
+    outcome_profile = pd.crosstab(
+        frame["cluster"],
+        frame["OutcomeType"],
+        normalize="index",
+    ).mul(100.0).reset_index()
+    return profile, bin_profile, outcome_profile
+
+
+def run_species_long_stay_clustering(
+    species_frame: pd.DataFrame,
+    species: str,
+) -> SpeciesLongStayClusteringResult:
+    """Run PCA + K-Means on duration-free long-stay clustering inputs."""
+    frame = species_frame.copy()
+    preprocessor = build_long_stay_preprocessor()
+    encoded = _as_dense(preprocessor.fit_transform(frame))
+
+    pca = PCA(svd_solver="full", random_state=DEFAULT_RANDOM_STATE)
+    full_reduced = pca.fit_transform(encoded)
+    component_count = _select_pca_components(pca.explained_variance_ratio_)
+    reduced = full_reduced[:, :component_count]
+
+    candidate_scores = _score_kmeans(reduced)
+    selected_row = candidate_scores.sort_values(
+        by=["silhouette_sample", "k"],
+        ascending=[False, True],
+    ).iloc[0]
+    selected_k = int(selected_row["k"])
+
+    final_model = KMeans(n_clusters=selected_k, random_state=DEFAULT_RANDOM_STATE, n_init=20)
+    frame["cluster"] = final_model.fit_predict(reduced)
+
+    cluster_profile, duration_bin_profile, outcome_profile = _profile_clusters(frame)
+    feature_separation = _rank_feature_separation(
+        encoded=encoded,
+        encoded_feature_names=list(preprocessor.get_feature_names_out()),
+        labels=frame["cluster"].to_numpy(dtype=int),
     )
-    counts = pd.crosstab(outcome_frame["cluster"], outcome_frame["OutcomeType"])
-    label_order = [label for label in LABEL_ORDER if label in counts.columns]
-    label_order += sorted(label for label in counts.columns if label not in label_order)
-    counts = counts.reindex(columns=label_order, fill_value=0)
-    rates = counts.div(counts.sum(axis=1), axis=0) * 100.0
-
-    outcome_rows: list[dict[str, object]] = []
-    for cluster_id, row in counts.iterrows():
-        dominant = str(row.idxmax())
-        result: dict[str, object] = {
-            "cluster": int(cluster_id),
-            "dominant_outcome": dominant,
-        }
-        for label in label_order:
-            result[f"{label}_pct"] = _format_percent(float(rates.loc[cluster_id, label]))
-        outcome_rows.append(result)
-    return cluster_summary, pd.DataFrame(outcome_rows)
-
-
-def _build_coordinate_frame(reduced: np.ndarray, labels: np.ndarray) -> pd.DataFrame:
-    """Prepare the first two PCA dimensions for scatter plotting and report previews."""
-    if reduced.shape[1] == 1:
-        pc2 = np.zeros(len(reduced), dtype=np.float64)
-    else:
-        pc2 = reduced[:, 1]
-    return pd.DataFrame(
+    pca_coordinates = pd.DataFrame(
         {
             "pc1": reduced[:, 0],
-            "pc2": pc2,
-            "cluster": labels.astype(int),
+            "pc2": reduced[:, 1] if reduced.shape[1] > 1 else np.zeros(len(reduced)),
+            "cluster": frame["cluster"].to_numpy(dtype=int),
         }
     )
-
-
-def _select_pca_component_count(explained: np.ndarray, pca_variance: float) -> int:
-    """Return the smallest component count that reaches the requested cumulative variance."""
-    if not 0.0 < pca_variance <= 1.0:
-        raise ValueError("pca_variance must be between 0.0 and 1.0.")
-    cumulative = np.cumsum(explained)
-    return int(np.searchsorted(cumulative, pca_variance, side="left") + 1)
-
-
-def _scree_elbow_component(explained: np.ndarray) -> int:
-    """Find the scree elbow by maximum distance from the first-to-last component line."""
-    if len(explained) <= 2:
-        return int(len(explained))
-
-    x = np.arange(1, len(explained) + 1, dtype=np.float64)
-    y = explained.astype(np.float64)
-    x1, y1 = x[0], y[0]
-    x2, y2 = x[-1], y[-1]
-    denominator = np.hypot(y2 - y1, x2 - x1)
-    if denominator == 0.0:
-        return 1
-
-    distances = np.abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1)
-    distances = distances / denominator
-    return int(np.argmax(distances) + 1)
-
-
-def _build_scree_frame(explained: np.ndarray) -> pd.DataFrame:
-    """Build a scree table with per-component and cumulative explained variance."""
-    components = np.arange(1, len(explained) + 1, dtype=int)
-    return pd.DataFrame(
-        {
-            "component": components,
-            "explained_variance": explained,
-            "cumulative_variance": np.cumsum(explained),
-        }
-    )
-
-
-def _ordered_animal_types(raw_features: pd.DataFrame) -> list[str]:
-    """Return AnimalType values in Cat/Dog order first, with any unexpected values last."""
-    if "AnimalType" not in raw_features.columns:
-        raise ValueError("Species-specific clustering requires the raw 'AnimalType' column.")
-
-    values = {
-        str(value)
-        for value in raw_features["AnimalType"].dropna().unique().tolist()
-        if str(value).strip()
-    }
-    ordered = [species for species in DEFAULT_SPECIES_ORDER if species in values]
-    ordered.extend(sorted(values.difference(ordered)))
-    return ordered
-
-
-def run_clustering_analysis(
-    raw_features: pd.DataFrame,
-    y: Optional[pd.Series] = None,
-    k_range: Iterable[int] = DEFAULT_K_RANGE,
-    pca_variance: float = DEFAULT_PCA_VARIANCE,
-    silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
-    random_state: int = DEFAULT_RANDOM_STATE,
-    segment_name: str = "All animals",
-    include_animal_type: bool = True,
-    variant: Union[str, ClusteringVariant] = "v3",
-) -> ClusteringAnalysisResult:
-    """Run clustering preprocessing, PCA feature reduction, K selection, and K-Means."""
-    spec = get_clustering_variant(variant)
-    preprocessing_pipeline = build_clustering_pipeline(
-        include_animal_type=include_animal_type,
-        variant=spec,
-    )
-    preprocessed = _as_dense_array(preprocessing_pipeline.fit_transform(raw_features))
-
-    # Fit full PCA once so the scree plot and the reduced matrix use the same decomposition.
-    pca = PCA(svd_solver="full", random_state=random_state)
-    full_reduced = pca.fit_transform(preprocessed)
-    component_count = _select_pca_component_count(pca.explained_variance_ratio_, pca_variance)
-    reduced = full_reduced[:, :component_count]
-    selected_explained = pca.explained_variance_ratio_[:component_count]
-    scree = _build_scree_frame(pca.explained_variance_ratio_)
-    elbow_component = _scree_elbow_component(pca.explained_variance_ratio_)
-
-    candidate_scores = _score_kmeans_candidates(
-        reduced=reduced,
-        k_range=tuple(k_range),
-        silhouette_sample_size=silhouette_sample_size,
-        random_state=random_state,
-    )
-    selected_k = _choose_best_k(candidate_scores)
-
-    # Refit the final model at the selected K so all downstream outputs share one label set.
-    final_model = KMeans(n_clusters=selected_k, random_state=random_state, n_init=20)
-    labels = final_model.fit_predict(reduced)
-    selected_score = candidate_scores.loc[
-        candidate_scores["k"] == selected_k,
-        "silhouette_sample",
-    ].iloc[0]
-
-    cluster_summary, outcome_distribution = _summarize_clusters(
-        raw_features,
-        labels,
-        y,
-        spec,
-    )
-    coordinates = _build_coordinate_frame(reduced, labels)
-    centers = pd.DataFrame(
+    cluster_centers = pd.DataFrame(
         {
             "cluster": np.arange(selected_k, dtype=int),
             "pc1": final_model.cluster_centers_[:, 0],
             "pc2": (
                 final_model.cluster_centers_[:, 1]
                 if reduced.shape[1] > 1
-                else np.zeros(selected_k, dtype=np.float64)
+                else np.zeros(selected_k)
             ),
         }
     )
-    top_breeds = sorted(preprocessing_pipeline.named_steps["breed_frequency"].retained_breeds_)
-    top_colors = (
-        sorted(preprocessing_pipeline.named_steps["color_top_k"].retained_colors_)
-        if spec.use_color
-        else []
-    )
 
-    return ClusteringAnalysisResult(
-        variant=spec,
-        segment_name=segment_name,
-        raw_shape=raw_features.shape,
-        preprocessed_shape=preprocessed.shape,
+    return SpeciesLongStayClusteringResult(
+        species=species,
+        raw_shape=species_frame.shape,
+        feature_shape=frame[NUMERIC_FEATURES + CATEGORICAL_FEATURES].shape,
+        encoded_shape=encoded.shape,
         pca_shape=reduced.shape,
-        pca_variance_threshold=pca_variance,
-        pca_explained_variance=float(selected_explained.sum()),
-        pca_first_two_variance=float(pca.explained_variance_ratio_[:2].sum()),
-        pca_elbow_component=elbow_component,
-        pca_scree=scree,
+        pca_explained_variance=float(pca.explained_variance_ratio_[:component_count].sum()),
         selected_k=selected_k,
-        inertia=float(final_model.inertia_),
-        silhouette_sample=float(selected_score),
-        top_breeds=top_breeds,
-        top_colors=top_colors,
+        silhouette_sample=float(selected_row["silhouette_sample"]),
         candidate_scores=candidate_scores,
-        cluster_summary=cluster_summary,
-        outcome_distribution=outcome_distribution,
-        pca_coordinates=coordinates,
-        cluster_centers_2d=centers,
+        cluster_profile=cluster_profile,
+        duration_bin_profile=duration_bin_profile,
+        outcome_profile=outcome_profile,
+        feature_separation=feature_separation,
+        pca_coordinates=pca_coordinates,
+        cluster_centers_2d=cluster_centers,
     )
 
 
-def run_species_clustering_analysis(
-    raw_features: pd.DataFrame,
-    y: Optional[pd.Series] = None,
-    k_range: Iterable[int] = DEFAULT_K_RANGE,
-    pca_variance: float = DEFAULT_PCA_VARIANCE,
-    silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
-    random_state: int = DEFAULT_RANDOM_STATE,
-    variant: Union[str, ClusteringVariant] = "v3",
-) -> dict[str, ClusteringAnalysisResult]:
-    """Run the full clustering workflow separately for each AnimalType subset."""
-    spec = get_clustering_variant(variant)
-    results: dict[str, ClusteringAnalysisResult] = {}
-    for species in _ordered_animal_types(raw_features):
-        mask = raw_features["AnimalType"].astype(str) == species
-        subset = raw_features.loc[mask].copy()
-        y_subset = y.loc[mask].reset_index(drop=True) if y is not None else None
-
-        # AnimalType is the split criterion, so it is intentionally excluded inside each run.
-        results[species] = run_clustering_analysis(
-            raw_features=subset,
-            y=y_subset,
-            k_range=k_range,
-            pca_variance=pca_variance,
-            silhouette_sample_size=silhouette_sample_size,
-            random_state=random_state,
-            segment_name=species,
-            include_animal_type=False,
-            variant=spec,
-        )
-    return results
+def run_long_stay_clustering(frame: pd.DataFrame) -> tuple[dict[str, SpeciesLongStayClusteringResult], pd.DataFrame]:
+    """Run long-stay clustering separately for Cat and Dog subsets."""
+    results: dict[str, SpeciesLongStayClusteringResult] = {}
+    clustered_frames: list[pd.DataFrame] = []
+    for species in ["Cat", "Dog"]:
+        subset = frame[frame["AnimalType"].astype(str) == species].copy()
+        if subset.empty:
+            continue
+        result = run_species_long_stay_clustering(subset, species)
+        results[species] = result
+        subset = subset.reset_index(drop=True)
+        subset["cluster"] = result.pca_coordinates["cluster"].to_numpy(dtype=int)
+        clustered_frames.append(subset)
+    clustered = pd.concat(clustered_frames, ignore_index=True)
+    return results, clustered
 
 
-def plot_cluster_scatter(
-    result: ClusteringAnalysisResult,
-    output_path: Path,
-) -> Path:
-    """Save a PC1/PC2 scatter plot colored by K-Means cluster."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Keep matplotlib's font/cache files outside the repository and away from unwritable home dirs.
+def _configure_matplotlib() -> None:
+    """Keep matplotlib cache files outside the repository and unwritable home directories."""
     mpl_config_dir = Path(gettempdir()) / "ds2026-shelter-matplotlib"
     mpl_config_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
 
-    try:
-        import matplotlib
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("matplotlib is required to generate clustering plots.") from exc
+def plot_pca_scatter(results: dict[str, SpeciesLongStayClusteringResult], output_path: Path) -> Path:
+    """Save species-specific PCA scatter plots with cluster centers."""
+    _configure_matplotlib()
+    import matplotlib
 
-    coordinates = result.pca_coordinates
-    centers = result.cluster_centers_2d
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(9, 6), dpi=150)
-    scatter = ax.scatter(
-        coordinates["pc1"],
-        coordinates["pc2"],
-        c=coordinates["cluster"],
-        cmap="tab10",
-        s=9,
-        alpha=0.55,
-        linewidths=0,
-    )
-    ax.scatter(
-        centers["pc1"],
-        centers["pc2"],
-        c=centers["cluster"],
-        cmap="tab10",
-        s=130,
-        marker="X",
-        edgecolor="black",
-        linewidth=0.8,
-    )
-    ax.set_title(f"{result.segment_name} K-Means Clusters Projected onto PCA Components")
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.grid(alpha=0.2)
-    fig.colorbar(scatter, ax=ax, label="Cluster")
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-    return output_path
-
-
-def plot_species_cluster_scatters(
-    results: dict[str, ClusteringAnalysisResult],
-    output_path: Path,
-) -> Path:
-    """Save one PC1/PC2 scatter plot per AnimalType in a single comparison image."""
-    if not results:
-        raise ValueError("No clustering results were provided for plotting.")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Keep matplotlib's font/cache files outside the repository and away from unwritable home dirs.
-    mpl_config_dir = Path(gettempdir()) / "ds2026-shelter-matplotlib"
-    mpl_config_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
-
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("matplotlib is required to generate clustering plots.") from exc
-
-    fig, axes = plt.subplots(
-        1,
-        len(results),
-        figsize=(8 * len(results), 6),
-        dpi=150,
-        squeeze=False,
-    )
-    axes_flat = axes.ravel()
-
-    for ax, result in zip(axes_flat, results.values()):
-        coordinates = result.pca_coordinates
+    fig, axes = plt.subplots(1, len(results), figsize=(8 * len(results), 6), dpi=150, squeeze=False)
+    for ax, result in zip(axes.ravel(), results.values()):
+        coords = result.pca_coordinates
         centers = result.cluster_centers_2d
         scatter = ax.scatter(
-            coordinates["pc1"],
-            coordinates["pc2"],
-            c=coordinates["cluster"],
+            coords["pc1"],
+            coords["pc2"],
+            c=coords["cluster"],
             cmap="tab10",
             s=9,
             alpha=0.55,
@@ -508,337 +356,271 @@ def plot_species_cluster_scatters(
             edgecolor="black",
             linewidth=0.8,
         )
-        ax.set_title(f"{result.segment_name} clusters (K={result.selected_k})")
+        ax.set_title(f"{result.species} clusters (K={result.selected_k})")
         ax.set_xlabel("PC1")
         ax.set_ylabel("PC2")
         ax.grid(alpha=0.2)
         fig.colorbar(scatter, ax=ax, label="Cluster")
-
-    variant_title = next(iter(results.values())).variant.title
-    fig.suptitle(f"Species-Specific {variant_title} K-Means Clusters Projected onto PCA Components")
+    fig.suptitle("Long-Stay Risk Clusters Projected onto PCA Components")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
     return output_path
 
 
-def plot_species_scree_plots(
-    results: dict[str, ClusteringAnalysisResult],
-    output_path: Path,
-) -> Path:
-    """Save species-specific PCA scree plots with elbow components marked."""
-    if not results:
-        raise ValueError("No clustering results were provided for scree plotting.")
+def plot_duration_boxplots(clustering_frame: pd.DataFrame, output_path: Path) -> Path:
+    """Plot numerical duration distributions by species and cluster."""
+    _configure_matplotlib()
+    import matplotlib
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    # Keep matplotlib's font/cache files outside the repository and away from unwritable home dirs.
-    mpl_config_dir = Path(gettempdir()) / "ds2026-shelter-matplotlib"
-    mpl_config_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
-
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("matplotlib is required to generate scree plots.") from exc
-
-    fig, axes = plt.subplots(
-        1,
-        len(results),
-        figsize=(8 * len(results), 6),
-        dpi=150,
-        squeeze=False,
-    )
-    axes_flat = axes.ravel()
-
-    for ax, result in zip(axes_flat, results.values()):
-        scree = result.pca_scree
-        elbow = result.pca_elbow_component
-        elbow_row = scree.loc[scree["component"] == elbow].iloc[0]
-
-        ax.plot(
-            scree["component"],
-            scree["explained_variance"],
-            marker="o",
-            linewidth=1.8,
-            markersize=4,
-        )
-        ax.axvline(elbow, color="crimson", linestyle="--", linewidth=1.2)
-        ax.scatter(
-            [elbow],
-            [elbow_row["explained_variance"]],
-            color="crimson",
-            s=60,
-            zorder=3,
-            label=f"Elbow PC{elbow}",
-        )
-        ax.set_title(f"{result.segment_name} PCA Scree Plot")
-        ax.set_xlabel("Principal component")
-        ax.set_ylabel("Explained variance ratio")
-        ax.grid(alpha=0.2)
-        ax.legend()
-
-        cumulative = float(elbow_row["cumulative_variance"])
-        ax.text(
-            0.98,
-            0.92,
-            f"Elbow: PC{elbow}\nCum. var: {cumulative:.3f}",
-            ha="right",
-            va="top",
-            transform=ax.transAxes,
-            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85},
-        )
-
-    variant_title = next(iter(results.values())).variant.title
-    fig.suptitle(f"Species-Specific {variant_title} PCA Scree Plots")
+    species_values = sorted(clustering_frame["AnimalType"].dropna().unique().tolist())
+    fig, axes = plt.subplots(1, len(species_values), figsize=(8 * len(species_values), 6), dpi=150, squeeze=False)
+    for ax, species in zip(axes.ravel(), species_values):
+        subset = clustering_frame[clustering_frame["AnimalType"] == species]
+        clusters = sorted(subset["cluster"].unique())
+        values = [
+            subset.loc[subset["cluster"] == cluster, "length_of_stay_days"].dropna() + 0.1
+            for cluster in clusters
+        ]
+        ax.boxplot(values, showfliers=False, patch_artist=True)
+        ax.set_xticks(range(1, len(clusters) + 1))
+        ax.set_xticklabels([str(cluster) for cluster in clusters])
+        ax.set_yscale("log")
+        ax.set_title(f"{species} duration by cluster")
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Length of stay days (+0.1, log scale)")
+        ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
     return output_path
 
 
-def _dataframe_to_markdown(df: pd.DataFrame) -> str:
-    """Render a small DataFrame as a GitHub-flavoured markdown table."""
-    if df.empty:
-        return "_No data available._"
-    headers = [str(col) for col in df.columns]
-    rows = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join("---" for _ in headers) + " |",
-    ]
-    for _, row in df.iterrows():
-        cells = []
-        for column, value in row.items():
-            if isinstance(value, float):
-                if column in {"k", "cluster", "count"} and value.is_integer():
-                    cells.append(str(int(value)))
-                elif column == "median_age_days":
-                    cells.append(f"{value:.1f}")
-                elif column == "median_age_years":
-                    cells.append(f"{value:.2f}")
-                else:
-                    cells.append(f"{value:.4f}")
-            else:
-                cells.append(str(value))
-        rows.append("| " + " | ".join(cells) + " |")
-    return "\n".join(rows)
+def plot_duration_bins(clustering_frame: pd.DataFrame, output_path: Path) -> Path:
+    """Plot categorical duration-bin distribution by species and cluster."""
+    _configure_matplotlib()
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    species_values = sorted(clustering_frame["AnimalType"].dropna().unique().tolist())
+    fig, axes = plt.subplots(1, len(species_values), figsize=(8 * len(species_values), 6), dpi=150, squeeze=False)
+    for ax, species in zip(axes.ravel(), species_values):
+        subset = clustering_frame[clustering_frame["AnimalType"] == species]
+        table = pd.crosstab(subset["cluster"], subset["duration_category"], normalize="index").mul(100.0)
+        table = table.reindex(columns=LOS_LABELS, fill_value=0.0)
+        table.plot(kind="bar", stacked=True, ax=ax, colormap="viridis")
+        ax.set_title(f"{species} duration categories by cluster")
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Percentage within cluster")
+        ax.tick_params(axis="x", rotation=0)
+        ax.legend(title="Duration", bbox_to_anchor=(1.02, 1), loc="upper left")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
 
 
-def _append_result_sections(lines: list[str], result: ClusteringAnalysisResult) -> None:
-    """Append shape, K selection, profile, and outcome tables for one clustering run."""
-    lines.append(f"### {result.segment_name}")
-    lines.append("")
-    lines.append(f"- Raw feature matrix: {result.raw_shape}")
-    lines.append(f"- Encoded clustering matrix: {result.preprocessed_shape}")
-    lines.append(f"- PCA-reduced matrix: {result.pca_shape}")
-    lines.append(
-        f"- PCA explained variance retained: {result.pca_explained_variance:.4f} "
-        f"(threshold={result.pca_variance_threshold:.2f})"
-    )
-    lines.append(f"- PC1 + PC2 explained variance: {result.pca_first_two_variance:.4f}")
-    lines.append(f"- Scree elbow component: PC{result.pca_elbow_component}")
-    lines.append(f"- Selected K: **{result.selected_k}**")
-    lines.append(f"- Final inertia: **{result.inertia:.4f}**")
-    lines.append(f"- Sampled silhouette score: **{result.silhouette_sample:.4f}**")
-    lines.append(f"- Retained breed levels: {len(result.top_breeds)}")
-    if result.variant.use_color:
-        lines.append(f"- Retained color levels: {len(result.top_colors)}")
-    lines.append("")
-    lines.append("#### K Selection")
-    lines.append("")
-    lines.append(_dataframe_to_markdown(result.candidate_scores))
-    lines.append("")
-    lines.append("#### Cluster Profiles")
-    lines.append("")
-    lines.append(_dataframe_to_markdown(result.cluster_summary))
-    lines.append("")
-    if not result.outcome_distribution.empty:
-        lines.append("#### Post-Hoc Outcome Distribution")
-        lines.append("")
-        lines.append(_dataframe_to_markdown(result.outcome_distribution))
-        lines.append("")
-
-
-def _variant_pipeline_lines(variant: ClusteringVariant, species_specific: bool) -> list[str]:
-    """Describe the selected clustering feature set for markdown reports."""
-    lines: list[str] = []
-    if species_specific:
-        lines.append("- Split raw data by `AnimalType` (`Cat`, `Dog`)")
-        lines.append("- Run feature engineering independently inside each species subset")
-        lines.append("- Exclude `animal_type` from clustering features because it is constant after filtering")
-    else:
-        lines.append("- Raw input: shelter animal feature columns only")
-
-    if variant.use_age_days:
-        lines.append("- Age handling: use numeric `age_days` as a clustering feature")
-    elif variant.use_age_group:
-        lines.append("- Age handling: replace numeric `age_days` with `baby`, `young`, `adult`, or `senior`")
-    else:
-        lines.append("- Age handling: do not use `age_days` or `age_group` to fit clusters")
-        lines.append("- Age values shown in cluster profiles are post-hoc descriptors only")
-
-    frequency_scope = "per species" if species_specific else "in the fitted data"
-    lines.append(
-        f"- Breed reduction: keep `primary_breed` values at or above 1% frequency {frequency_scope} and group the rest as `Other`"
-    )
-    if variant.use_color:
-        lines.append(
-            f"- Color handling: keep the top 15 `primary_color` values {frequency_scope} and group the rest as `Other`"
-        )
-    else:
-        lines.append(f"- Color exclusion: do not use `primary_color` in clustering {variant.name}")
-    lines.append("- Numeric preprocessing: median imputation and RobustScaler")
-    lines.append("- Categorical preprocessing: most-frequent imputation and OneHotEncoder")
-    lines.append("- PCA: retain at least 95% of variance before K-Means")
-    model_scope = " per species" if species_specific else ""
-    lines.append(f"- Model: K-Means, selected by sampled silhouette score over K=2..6{model_scope}")
-    return lines
-
-
-def write_clustering_report(
-    result: ClusteringAnalysisResult,
-    report_path: Path,
-    plot_path: Optional[Path] = None,
-    plot_error: Optional[str] = None,
+def write_long_stay_report(
+    results: dict[str, SpeciesLongStayClusteringResult],
+    enriched: pd.DataFrame,
+    clustering_frame: pd.DataFrame,
+    plot_paths: dict[str, Path],
+    report_path: Path = REPORT_PATH,
 ) -> Path:
-    """Write the clustering process, PCA reduction, metrics, and interpretation to markdown."""
+    """Write long-stay clustering metrics and duration profiles to markdown."""
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    variant = result.variant
-
     lines: list[str] = []
-    lines.append(f"# {variant.title} Report")
+    lines.append("# Long-Stay Risk Clustering Report")
     lines.append("")
     lines.append("## Purpose")
     lines.append("")
     lines.append(
-        f"This report runs the {variant.name} unsupervised clustering workflow: preprocessing, "
-        "PCA feature reduction, K-Means analysis, and cluster interpretation."
+        "This workflow joins each outcome row to the nearest previous intake row, "
+        "computes length of stay, clusters animals using duration-free intake/animal "
+        "features, and profiles each cluster with breed/sex/color/mixed-breed, numerical duration, "
+        "categorical duration, and outcome distributions."
     )
     lines.append("")
-    lines.append(f"Feature set: {variant.description}")
+    lines.append("## Workflow Design")
     lines.append("")
-    lines.append("`OutcomeType` is not used to fit clusters; it is shown only after clustering for interpretation.")
+    lines.append("Main long-stay clustering uses only these inputs:")
     lines.append("")
-    lines.append("## Pipeline")
-    lines.append("")
-    lines.extend(_variant_pipeline_lines(variant, species_specific=False))
-    lines.append("")
-    lines.append("## Shape And Reduction")
-    lines.append("")
-    lines.append(f"- Raw feature matrix: {result.raw_shape}")
-    lines.append(f"- Encoded clustering matrix: {result.preprocessed_shape}")
-    lines.append(f"- PCA-reduced matrix: {result.pca_shape}")
-    lines.append(
-        f"- PCA explained variance retained: {result.pca_explained_variance:.4f} "
-        f"(threshold={result.pca_variance_threshold:.2f})"
-    )
-    lines.append(f"- PC1 + PC2 explained variance: {result.pca_first_two_variance:.4f}")
-    lines.append("")
-    lines.append("## K Selection")
-    lines.append("")
-    lines.append(_dataframe_to_markdown(result.candidate_scores))
-    lines.append("")
-    lines.append(f"Selected K: **{result.selected_k}**")
-    lines.append(f"Final inertia: **{result.inertia:.4f}**")
-    lines.append(f"Sampled silhouette score: **{result.silhouette_sample:.4f}**")
-    lines.append("")
-    lines.append("## Cluster Profiles")
-    lines.append("")
-    lines.append(_dataframe_to_markdown(result.cluster_summary))
-    lines.append("")
-    if not result.outcome_distribution.empty:
-        lines.append("## Post-Hoc Outcome Distribution")
-        lines.append("")
-        lines.append(_dataframe_to_markdown(result.outcome_distribution))
-        lines.append("")
-    lines.append("## Visualization")
-    lines.append("")
-    if plot_path is not None:
-        lines.append(f"- PCA scatter plot: `{plot_path.as_posix()}`")
-        lines.append("- Each point is one animal projected onto PC1 and PC2.")
-        lines.append("- Colors are K-Means clusters; X markers are cluster centers in PCA space.")
-    elif plot_error:
-        lines.append(f"- Plot was skipped: {plot_error}")
-    else:
-        lines.append("- Plot was not requested.")
-    lines.append("")
-    lines.append("## Notes")
+    lines.append("- `has_name`")
+    lines.append("- `primary_breed`")
+    lines.append("- `intake_type`")
+    lines.append("- `intake_condition`")
+    lines.append("- `neuter_status`")
+    lines.append("- `intake_age_group`")
     lines.append("")
     lines.append(
-        "The PCA scatter is a 2D explanation view, while K-Means is fit on the PCA matrix "
-        "that retains the configured variance threshold."
+        "Breed is represented as `primary_breed`; species-specific breed values under "
+        f"{BREED_MIN_SPECIES_RATIO:.0%} are grouped into `Other` before clustering."
     )
     lines.append("")
-
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    return report_path
-
-
-def write_species_clustering_report(
-    results: dict[str, ClusteringAnalysisResult],
-    report_path: Path,
-    plot_path: Optional[Path] = None,
-    plot_error: Optional[str] = None,
-    scree_plot_path: Optional[Path] = None,
-    scree_plot_error: Optional[str] = None,
-) -> Path:
-    """Write a Cat/Dog-separated clustering report with PCA metrics and interpretation."""
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    if not results:
-        raise ValueError("No clustering results were provided for reporting.")
-    variant = next(iter(results.values())).variant
-
-    lines: list[str] = []
-    lines.append(f"# Species-Specific {variant.title} Report")
+    lines.append("Post-hoc-only profiling uses these fields after clusters are assigned:")
     lines.append("")
-    lines.append("## Purpose")
+    lines.append("- Sex: `sex`")
+    lines.append("- Color: `primary_color`")
+    lines.append("- Mixed breed flag: `is_mixed_breed`")
+    lines.append("- Numerical duration: `length_of_stay_days`")
+    lines.append("- Categorical duration: `duration_category`")
+    lines.append("- Outcome distribution: `OutcomeType`")
+    lines.append("")
+    lines.append("## Data Join And Duration")
+    lines.append("")
+    lines.append(f"- Enriched CSV: `{ENRICHED_TRAIN_PATH.relative_to(PROJECT_ROOT)}`")
+    lines.append(f"- Original train rows: {len(enriched):,}")
+    lines.append(f"- Rows usable for clustering/profile: {len(clustering_frame):,}")
+    lines.append(f"- Missing or invalid duration rows excluded from clustering/profile: {len(enriched) - len(clustering_frame):,}")
+    lines.append("")
+    lines.append("Matching rule: same animal ID, then latest intake datetime at or before outcome datetime.")
+    lines.append("")
+    lines.append("Duration is calculated as `outcome DateTime - intake_datetime`.")
+    lines.append("")
+    lines.append("## Missing Handling")
+    lines.append("")
+    lines.append("- Original rows with no valid previous intake or invalid duration are kept in the enriched CSV.")
+    lines.append("- Rows without valid non-negative duration are excluded from clustering/profile tables.")
+    lines.append("- Categorical clustering inputs are imputed with the most frequent value after Unknown normalization.")
+    lines.append("- Numeric clustering inputs are imputed with the median and scaled with RobustScaler.")
+    lines.append("")
+    lines.append("## Clustering Inputs")
     lines.append("")
     lines.append(
-        f"This report runs the {variant.name} unsupervised clustering workflow separately for each "
-        "`AnimalType` subset. Cats and dogs are filtered first because species can "
-        "dominate distance-based clustering when they are mixed in one K-Means run."
+        "Duration, sex, color, and mixed-breed columns are not used as clustering inputs. "
+        "`primary_breed` is used as a categorical clustering input."
     )
     lines.append("")
-    lines.append(f"Feature set: {variant.description}")
+    lines.append("Numeric inputs:")
+    for column in NUMERIC_FEATURES:
+        lines.append(f"- `{column}`")
     lines.append("")
-    lines.append("`OutcomeType` is not used to fit clusters; it is shown only after clustering for interpretation.")
+    lines.append("Categorical inputs:")
+    for column in CATEGORICAL_FEATURES:
+        lines.append(f"- `{column}`")
     lines.append("")
-    lines.append("## Pipeline")
+    lines.append("## Post-Hoc Profiling Fields")
     lines.append("")
-    lines.extend(_variant_pipeline_lines(variant, species_specific=True))
+    for column in PROFILE_ONLY_FEATURES:
+        lines.append(f"- `{column}`")
+    lines.append("- `OutcomeType`")
     lines.append("")
     lines.append("## Species Results")
     lines.append("")
     for result in results.values():
-        _append_result_sections(lines, result)
-
-    lines.append("## Visualization")
+        lines.append(f"### {result.species}")
+        lines.append("")
+        lines.append(f"- Raw rows/columns: {result.raw_shape}")
+        lines.append(f"- Feature matrix: {result.feature_shape}")
+        lines.append(f"- Encoded matrix: {result.encoded_shape}")
+        lines.append(f"- PCA matrix: {result.pca_shape}")
+        lines.append(f"- PCA explained variance retained: {result.pca_explained_variance:.4f}")
+        lines.append(f"- Selected K: **{result.selected_k}**")
+        lines.append(f"- Sampled silhouette score: **{result.silhouette_sample:.4f}**")
+        lines.append("")
+        lines.append("#### K Selection")
+        lines.append("")
+        lines.append(_markdown_table(result.candidate_scores))
+        lines.append("")
+        lines.append("#### Feature Separation Ranking")
+        lines.append("")
+        lines.append(
+            "This is not supervised feature importance; it ranks clustering inputs by "
+            "how differently they are distributed across the selected clusters."
+        )
+        lines.append("")
+        lines.append(_markdown_table(result.feature_separation))
+        lines.append("")
+        lines.append("#### Cluster Profiles With Numerical Duration")
+        lines.append("")
+        lines.append(_markdown_table(result.cluster_profile))
+        lines.append("")
+        lines.append("#### Categorical Duration Distribution By Cluster")
+        lines.append("")
+        lines.append(_markdown_table(result.duration_bin_profile))
+        lines.append("")
+        lines.append("#### Post-Hoc Outcome Distribution By Cluster")
+        lines.append("")
+        lines.append(_markdown_table(result.outcome_profile))
+        lines.append("")
+    lines.append("## Visualizations")
     lines.append("")
-    if plot_path is not None:
-        lines.append(f"- PCA scatter plot: `{plot_path.as_posix()}`")
-        lines.append("- Each panel is one species-specific clustering run.")
-        lines.append("- Each point is one animal projected onto PC1 and PC2.")
-        lines.append("- Colors are K-Means clusters; X markers are cluster centers in PCA space.")
-    elif plot_error:
-        lines.append(f"- Plot was skipped: {plot_error}")
-    else:
-        lines.append("- Plot was not requested.")
-    if scree_plot_path is not None:
-        lines.append(f"- PCA scree plot: `{scree_plot_path.as_posix()}`")
-        lines.append("- The dashed red line marks the scree elbow component for each species.")
-    elif scree_plot_error:
-        lines.append(f"- Scree plot was skipped: {scree_plot_error}")
+    for label, path in plot_paths.items():
+        lines.append(f"- {label}: `{path.relative_to(PROJECT_ROOT)}`")
     lines.append("")
-    lines.append("## Notes")
-    lines.append("")
-    lines.append(
-        "The PCA scatter uses only PC1 and PC2 for visualization. K-Means is fit on "
-        "the PCA matrix that retains the configured variance threshold for each species."
-    )
-    lines.append("")
-
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
+
+
+def run_long_stay_workflow(
+    train_csv: Path = TRAIN_CSV,
+    intake_csv: Optional[Path] = None,
+    enriched_train_path: Path = ENRICHED_TRAIN_PATH,
+    output_dir: Path = OUTPUT_DIR,
+) -> tuple[dict[str, SpeciesLongStayClusteringResult], pd.DataFrame, pd.DataFrame]:
+    """Run the full long-stay workflow and write data, reports, and plots."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    enriched_train_path.parent.mkdir(parents=True, exist_ok=True)
+
+    intake_csv = intake_csv or find_intake_csv()
+    train = pd.read_csv(train_csv)
+    intakes = pd.read_csv(intake_csv)
+    validate_columns(train, ["AnimalID", "DateTime", "OutcomeType", "AnimalType"], train_csv.name)
+    validate_columns(
+        intakes,
+        [
+            "animal_id",
+            "datetime",
+            "intake_type",
+            "intake_condition",
+            "sex_upon_intake",
+            "age_upon_intake",
+            "breed",
+            "color",
+        ],
+        intake_csv.name,
+    )
+
+    enriched = build_train_with_latest_intake(train, intakes)
+    enriched.to_csv(enriched_train_path, index=False)
+
+    clustering_frame = build_long_stay_clustering_frame(enriched)
+    results, clustered = run_long_stay_clustering(clustering_frame)
+    clustered.to_csv(output_dir / "clustered_long_stay_profile_rows.csv", index=False)
+
+    plot_paths = {
+        "PCA cluster scatter": output_dir / PCA_SCATTER_FILENAME,
+        "Numerical duration boxplots": output_dir / DURATION_BOXPLOT_FILENAME,
+        "Categorical duration bins": output_dir / DURATION_BINS_FILENAME,
+    }
+    plot_pca_scatter(results, plot_paths["PCA cluster scatter"])
+    plot_duration_boxplots(clustered, plot_paths["Numerical duration boxplots"])
+    plot_duration_bins(clustered, plot_paths["Categorical duration bins"])
+    write_long_stay_report(results, enriched, clustering_frame, plot_paths, output_dir / REPORT_PATH.name)
+    return results, enriched, clustered
+
+
+def main() -> None:
+    """CLI entrypoint for the long-stay risk clustering workflow."""
+    results, enriched, clustered = run_long_stay_workflow()
+    print(f"Enriched CSV written: {ENRICHED_TRAIN_PATH.relative_to(PROJECT_ROOT)}")
+    print(f"Rows usable for clustering/profile: {len(clustered):,} / {len(enriched):,}")
+    for species, result in results.items():
+        print(
+            f"{species}: K={result.selected_k}, "
+            f"silhouette={result.silhouette_sample:.4f}, "
+            f"encoded={result.encoded_shape}, pca={result.pca_shape}"
+        )
+    print(f"Report written: {REPORT_PATH.relative_to(PROJECT_ROOT)}")
+    print(f"Plot written: {(OUTPUT_DIR / PCA_SCATTER_FILENAME).relative_to(PROJECT_ROOT)}")
+    print(f"Plot written: {(OUTPUT_DIR / DURATION_BOXPLOT_FILENAME).relative_to(PROJECT_ROOT)}")
+    print(f"Plot written: {(OUTPUT_DIR / DURATION_BINS_FILENAME).relative_to(PROJECT_ROOT)}")
+
+
+if __name__ == "__main__":
+    main()
