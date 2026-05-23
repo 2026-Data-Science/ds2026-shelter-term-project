@@ -58,12 +58,15 @@ param_grids = {
         "classifier__class_weight": [None, "balanced"],
     },
 
+    # 파라미터 범위는 최대한 다양하게 잡되, 너무 넓으면 튜닝 시간이 오래 걸리므로 나눠서 진행하였습니다.
     "RandomForest": {
-        "classifier__n_estimators": [100, 200, 300],
-        "classifier__max_depth": [None, 10, 20],
-        "classifier__min_samples_split": [2, 5],
-        "classifier__min_samples_leaf": [1, 2],
-        "classifier__class_weight": [None, "balanced"],
+        "classifier__n_estimators": [300, 600], # 100, 200, 300, 500, 600 시도
+        "classifier__max_depth": [None, 10, 20], 
+        "classifier__min_samples_split": [2, 5], # 2, 5, 10 시도
+        "classifier__min_samples_leaf": [1, 2, 5, 10], # 1, 2, 5, 10 시도
+        # 위 파라미터들 중 최적의 조합 찾은 뒤, class별로 가중치 조정을 시도해보았으나 
+        # balanced가 항상 더 좋게 나와서 최종적으로는 balanced로 고정하였습니다.
+        "classifier__class_weight": [None, "balanced"], 
     }
 }
 
