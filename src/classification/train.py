@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, f1_score
+from sklearn.dummy import DummyClassifier
 
 from src.classification.preprocessing import build_preprocessing_pipeline
 from src.classification.features import (
@@ -31,6 +32,9 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 models = {
+    "DummyClassifier": DummyClassifier(
+        strategy="most_frequent" # train 데이터에서 가장 많은 클래스만 예측한다.
+    ),
     "LogisticRegression": LogisticRegression(
         max_iter=2000, # 수렴을 위해 최대 반복 횟수 증가
         random_state=42,

@@ -4,6 +4,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold, cross_validate
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.dummy import DummyClassifier
 from sklearn.metrics import make_scorer, f1_score, accuracy_score
 
 from src.classification.preprocessing import build_preprocessing_pipeline
@@ -29,6 +30,9 @@ y = df[TARGET_COLUMN]
 # 2. 모델 정의
 # =========================
 models = {
+    "DummyClassifier": DummyClassifier(
+        strategy="most_frequent"
+    ),
     "LogisticRegression": LogisticRegression(
         max_iter=2000,
         random_state=42,
