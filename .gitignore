@@ -219,6 +219,15 @@ __marimo__/
 
 # Project data (Kaggle redistribution restriction)
 data/*.csv
+.DS_Store
+outputs/.DS_Store
+
+# Generated exploratory reports and plots.
+outputs/clustering*.md
+outputs/clustering*.png
+outputs/intake_outcome_duration/
+outputs/long_stay_risk_clustering/
+outputs/long_stay_risk_clustering_*/
 
 # IDE settings
 .vscode/
