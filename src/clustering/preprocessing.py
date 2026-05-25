@@ -49,7 +49,12 @@ def find_intake_csv(data_dir: Path = DATA_DIR) -> Path:
     """Find the downloaded Austin Animal Center intake CSV under data/."""
     matches = sorted(data_dir.glob(INTAKE_GLOB))
     if not matches:
-        raise FileNotFoundError(f"No intake CSV matching data/{INTAKE_GLOB} was found.")
+        raise FileNotFoundError(
+            f"No intake CSV matching data/{INTAKE_GLOB} was found.\n"
+            "  Download the Austin Animal Center Intakes dataset and\n"
+            "  place it under 'data/' as 'wter-evkm.csv':\n"
+            "  https://data.austintexas.gov/resource/wter-evkm.csv"
+        )
     return max(matches, key=lambda path: path.stat().st_mtime)
 
 
