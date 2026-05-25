@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +8,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    f1_score,
+)
+from sklearn.model_selection import (
+    StratifiedKFold,
+    cross_validate,
+    train_test_split,
+)
+from sklearn.pipeline import Pipeline
+
 from src.classification.features import (
+    FORBIDDEN_MODEL_INPUT_COLUMNS,
     LABEL_ORDER,
     LEAKAGE_COLUMNS,
     RAW_FEATURE_COLUMNS,
@@ -20,8 +37,16 @@ from src.classification.preprocessing import (
     NUMERIC_COLUMNS_AFTER_TE,
     build_preprocessing_pipeline,
 )
+from src.clustering.analysis import (
+    DURATION_BINS_FILENAME,
+    DURATION_BOXPLOT_FILENAME,
+    OUTPUT_DIR,
+    PCA_SCATTER_FILENAME,
+    REPORT_PATH as CLUSTERING_REPORT_PATH,
+    run_long_stay_workflow,
+)
+from src.clustering.preprocessing import ENRICHED_TRAIN_PATH
 
-# Force UTF-8 on Windows consoles that default to cp949.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -32,8 +57,52 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
 
+# 교차검증용 기본 모델 (튜닝 전)
+_CV_MODELS: dict = {
+    "DummyClassifier": DummyClassifier(strategy="most_frequent"),
+    "LogisticRegression": LogisticRegression(
+        max_iter=2000,
+        random_state=42,
+        class_weight="balanced",
+        solver="lbfgs",
+        n_jobs=-1,
+    ),
+    "RandomForest": RandomForestClassifier(
+        n_estimators=200,
+        random_state=42,
+        class_weight="balanced",
+        n_jobs=-1,
+    ),
+}
 
-def _load_train() -> tuple[pd.DataFrame, pd.Series]:
+# 최종 학습용 튜닝된 모델
+_FINAL_MODELS: dict = {
+    "DummyClassifier": DummyClassifier(strategy="most_frequent"),
+    "LogisticRegression": LogisticRegression(
+        C=1,
+        class_weight=None,
+        max_iter=2000,
+        solver="lbfgs",
+        random_state=42,
+        n_jobs=-1,
+    ),
+    "RandomForest": RandomForestClassifier(
+        n_estimators=300,
+        max_depth=20,
+        min_samples_split=2,
+        min_samples_leaf=5,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# 데이터 로드
+# ---------------------------------------------------------------------------
+
+def _load_raw_df() -> pd.DataFrame:
     if not TRAIN_CSV.exists():
         sys.stderr.write(
             f"[main.py] '{TRAIN_CSV}' is missing.\n"
@@ -41,21 +110,26 @@ def _load_train() -> tuple[pd.DataFrame, pd.Series]:
             "    https://www.kaggle.com/c/shelter-animal-outcomes/data\n"
         )
         sys.exit(1)
+    return pd.read_csv(TRAIN_CSV)
 
-    train = pd.read_csv(TRAIN_CSV)
+
+def _load_train() -> tuple[pd.DataFrame, pd.Series]:
+    df = _load_raw_df()
     required = [*RAW_FEATURE_COLUMNS, TARGET_COLUMN, TRAIN_ID_COLUMN, *LEAKAGE_COLUMNS]
-    missing = [col for col in required if col not in train.columns]
+    missing = [col for col in required if col not in df.columns]
     if missing:
         sys.stderr.write(f"[main.py] train.csv schema mismatch. Missing columns: {missing}\n")
         sys.exit(2)
-
-    X = train[RAW_FEATURE_COLUMNS].copy()
-    y = train[TARGET_COLUMN].copy()
+    X = df[RAW_FEATURE_COLUMNS].copy()
+    y = df[TARGET_COLUMN].copy()
     return X, y
 
 
+# ---------------------------------------------------------------------------
+# 리포트 헬퍼
+# ---------------------------------------------------------------------------
+
 def _dataframe_to_markdown(df: pd.DataFrame) -> str:
-    """Render a DataFrame as a GitHub-flavoured markdown table without external deps."""
     headers = [str(col) for col in df.columns]
     header_line = "| " + " | ".join(headers) + " |"
     separator = "| " + " | ".join("---" for _ in headers) + " |"
@@ -126,9 +200,7 @@ def _write_report(
     lines.append("")
     lines.append(f"- Transformed shape: {transformed.shape}")
     lines.append(f"- Dtype: {transformed.dtype}")
-    lines.append(
-        f"- Numeric columns (including target encoded): {numeric_count}"
-    )
+    lines.append(f"- Numeric columns (including target encoded): {numeric_count}")
     lines.append(f"- OneHot expanded columns: {onehot_count}")
     lines.append(f"- Total columns: {numeric_count + onehot_count}")
     lines.append("")
@@ -147,12 +219,50 @@ def _write_report(
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def main() -> None:
+# ---------------------------------------------------------------------------
+# Classification 단계별 함수
+# ---------------------------------------------------------------------------
+
+def _run_data_inspection(df: pd.DataFrame, step: str = "1/4") -> None:
     print("=" * 60)
-    print("Classification preprocessing — end-to-end check")
+    print(f"STEP {step}  Dataset inspection")
     print("=" * 60)
 
-    X, y = _load_train()
+    print(f"Shape: {df.shape}  ({df.shape[0]} rows, {df.shape[1]} columns)")
+    print()
+
+    print("--- dtypes ---")
+    print(df.dtypes.to_string())
+    print()
+
+    print("--- head(5) ---")
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+    print(df.head().to_string())
+    print()
+
+    print("--- Missing values ---")
+    missing = df.isnull().sum()
+    missing_pct = (missing / len(df) * 100).round(2)
+    missing_df = pd.DataFrame({
+        "missing_count": missing,
+        "missing_pct": missing_pct,
+    })
+    print(missing_df[missing_df["missing_count"] > 0].to_string())
+    if missing_df["missing_count"].sum() == 0:
+        print("  (no missing values)")
+    print()
+
+    print("--- describe() ---")
+    print(df.describe(include="all").to_string())
+
+
+def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
+    print()
+    print("=" * 60)
+    print("STEP 2/4  Preprocessing verification")
+    print("=" * 60)
+
     print(f"[1/4] Loaded train.csv : X.shape={X.shape}, y.shape={y.shape}")
     print(f"      Target classes  : {sorted(y.unique())}")
     print("      Class proportions:")
@@ -212,11 +322,204 @@ def main() -> None:
         numeric_count=int(numeric_count),
         sample_preview=preview,
     )
+    print(f"      Report written: {REPORT_PATH.relative_to(PROJECT_ROOT)}")
+
+
+def _run_cross_validation(df: pd.DataFrame) -> None:
+    print()
+    print("=" * 60)
+    print("STEP 3/4  5-Fold Cross Validation  (pre-tuning exploration)")
+    print("=" * 60)
+
+    X = df.drop(columns=[col for col in FORBIDDEN_MODEL_INPUT_COLUMNS if col in df.columns])
+    y = df[TARGET_COLUMN]
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    scoring = {
+        "accuracy": "accuracy",
+        "macro_f1": "f1_macro",
+        "weighted_f1": "f1_weighted",
+    }
+
+    results = []
+    for model_name, classifier in _CV_MODELS.items():
+        print(f"\nEvaluating {model_name}...")
+        model = Pipeline([
+            ("preprocessing", build_preprocessing_pipeline()),
+            ("classifier", classifier),
+        ])
+        cv_result = cross_validate(model, X, y, cv=cv, scoring=scoring, n_jobs=-1)
+
+        result = {
+            "model": model_name,
+            "accuracy_mean": cv_result["test_accuracy"].mean(),
+            "accuracy_std": cv_result["test_accuracy"].std(),
+            "macro_f1_mean": cv_result["test_macro_f1"].mean(),
+            "macro_f1_std": cv_result["test_macro_f1"].std(),
+            "weighted_f1_mean": cv_result["test_weighted_f1"].mean(),
+            "weighted_f1_std": cv_result["test_weighted_f1"].std(),
+        }
+        results.append(result)
+
+        acc = f"{result['accuracy_mean']:.4f} ± {result['accuracy_std']:.4f}"
+        mf1 = f"{result['macro_f1_mean']:.4f} ± {result['macro_f1_std']:.4f}"
+        wf1 = (
+            f"{result['weighted_f1_mean']:.4f}"
+            f" ± {result['weighted_f1_std']:.4f}"
+        )
+        print(f"  Accuracy   : {acc}")
+        print(f"  Macro F1   : {mf1}")
+        print(f"  Weighted F1: {wf1}")
+
+    print()
+    print("Cross Validation Summary")
+    print(pd.DataFrame(results).to_string(index=False))
+
+
+def _run_final_training(df: pd.DataFrame) -> None:
+    print()
+    print("=" * 60)
+    print("STEP 4/4  Hold-out Training & Evaluation  (tuned hyperparameters)")
+    print("=" * 60)
+
+    X = df.drop(columns=[col for col in FORBIDDEN_MODEL_INPUT_COLUMNS if col in df.columns])
+    y = df[TARGET_COLUMN]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+    print(f"Train size: {len(X_train)}, Test size: {len(X_test)}")
+
+    results = []
+    for model_name, classifier in _FINAL_MODELS.items():
+        print(f"\nTraining {model_name}...")
+        model = Pipeline([
+            ("preprocessing", build_preprocessing_pipeline()),
+            ("classifier", classifier),
+        ])
+        model.fit(X_train, y_train)
+
+        print(f"Predicting with {model_name}...")
+        pred = model.predict(X_test)
+
+        accuracy = accuracy_score(y_test, pred)
+        macro_f1 = f1_score(y_test, pred, average="macro")
+        weighted_f1 = f1_score(y_test, pred, average="weighted")
+
+        results.append({
+            "model": model_name,
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+            "weighted_f1": weighted_f1,
+        })
+        print(classification_report(y_test, pred))
 
     print("=" * 60)
-    print("All checks passed.")
-    print(f"Report written: {REPORT_PATH.relative_to(PROJECT_ROOT)}")
+    print("Final Model Comparison")
+    pd.set_option("display.max_columns", None)
+    print(pd.DataFrame(results).to_string(index=False))
+
+
+# ---------------------------------------------------------------------------
+# 모드별 진입점
+# ---------------------------------------------------------------------------
+
+def run_classification() -> None:
     print("=" * 60)
+    print("Classification — end-to-end pipeline")
+    print("=" * 60)
+
+    df = _load_raw_df()
+    _run_data_inspection(df, step="1/4")
+
+    X, y = _load_train()
+    _run_preprocessing_check(X, y)
+
+    _run_cross_validation(df)
+    _run_final_training(df)
+
+    print()
+    print("=" * 60)
+    print("Classification pipeline complete.")
+    print("=" * 60)
+
+
+def _run_clustering() -> None:
+    print()
+    print("=" * 60)
+    print("STEP 2/2  Long-stay risk clustering")
+    print("=" * 60)
+    print("Long-stay risk clustering — intake join + K-Means profiling")
+
+    results, enriched, clustered = run_long_stay_workflow()
+
+    print(
+        f"[1/4] Enriched train CSV written: "
+        f"{ENRICHED_TRAIN_PATH.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"[2/4] Rows usable for clustering/profile: "
+        f"{len(clustered):,} / {len(enriched):,}"
+    )
+    for species, result in results.items():
+        print(
+            f"[3/4] {species}: selected K={result.selected_k}, "
+            f"silhouette={result.silhouette_sample:.4f}, "
+            f"encoded={result.encoded_shape}, pca={result.pca_shape}"
+        )
+    print(
+        f"[4/4] Report written: "
+        f"{CLUSTERING_REPORT_PATH.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA scatter    : "
+        f"{(OUTPUT_DIR / PCA_SCATTER_FILENAME).relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      Duration boxplot: "
+        f"{(OUTPUT_DIR / DURATION_BOXPLOT_FILENAME).relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      Duration bins  : "
+        f"{(OUTPUT_DIR / DURATION_BINS_FILENAME).relative_to(PROJECT_ROOT)}"
+    )
+
+
+def run_clustering() -> None:
+    print("=" * 60)
+    print("Clustering — end-to-end pipeline")
+    print("=" * 60)
+
+    df = _load_raw_df()
+    _run_data_inspection(df, step="1/2")
+
+    _run_clustering()
+
+    print()
+    print("=" * 60)
+    print("Clustering pipeline complete.")
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# CLI 진입점
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Data-science end-to-end pipeline runner"
+    )
+    parser.add_argument(
+        "mode",
+        choices=["classification", "clustering"],
+        help="Pipeline mode to run",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "classification":
+        run_classification()
+    elif args.mode == "clustering":
+        run_clustering()
 
 
 if __name__ == "__main__":
