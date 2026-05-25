@@ -232,3 +232,6 @@ outputs/long_stay_risk_clustering_*/
 # IDE settings
 .vscode/
 .idea/
+
+# Claude Code local settings
+.claude/settings.local.json
