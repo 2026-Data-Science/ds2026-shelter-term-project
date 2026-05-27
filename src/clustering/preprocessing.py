@@ -65,6 +65,19 @@ def validate_columns(frame: pd.DataFrame, required: list[str], label: str) -> No
         raise ValueError(f"{label} is missing required columns: {missing}")
 
 
+def normalize_intake_column_names(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Austin intake CSV headers (e.g. 'Animal ID') to snake_case."""
+    normalized = frame.copy()
+    normalized.columns = (
+        normalized.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"[^a-z0-9]+", "_", regex=True)
+        .str.strip("_")
+    )
+    return normalized
+
+
 def _age_to_days(value: object) -> float:
     """Convert Austin age text, such as '2 years', to approximate days."""
     if pd.isna(value):

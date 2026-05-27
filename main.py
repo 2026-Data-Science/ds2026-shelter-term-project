@@ -31,6 +31,10 @@ from src.clustering.analysis import (
     REPORT_PATH as CLUSTERING_REPORT_PATH,
     run_long_stay_workflow,
 )
+from src.clustering.pca_kmeans_comparison import COMPARISON_CSV, COMPARISON_MD
+from src.clustering.pca_silhouette_validation import VALIDATION_CSV, VALIDATION_MD
+from src.clustering.pca_threshold_kmeans_comparison import THRESHOLD_CSV, THRESHOLD_SUMMARY_MD
+from src.clustering.final_cluster_profile_report import PROFILE_CSV, PROFILE_MD
 from src.clustering.preprocessing import ENRICHED_TRAIN_PATH
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -341,6 +345,38 @@ def _run_clustering() -> None:
     print(
         f"      Duration bins  : "
         f"{(OUTPUT_DIR / DURATION_BINS_FILENAME).relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA comparison : "
+        f"{COMPARISON_MD.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA comparison : "
+        f"{COMPARISON_CSV.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA validation : "
+        f"{VALIDATION_MD.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA validation : "
+        f"{VALIDATION_CSV.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA threshold  : "
+        f"{THRESHOLD_SUMMARY_MD.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      PCA threshold  : "
+        f"{THRESHOLD_CSV.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      Report 5.5     : "
+        f"{PROFILE_MD.relative_to(PROJECT_ROOT)}"
+    )
+    print(
+        f"      Report 5.5     : "
+        f"{PROFILE_CSV.relative_to(PROJECT_ROOT)}"
     )
 
 
