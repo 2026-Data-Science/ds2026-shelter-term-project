@@ -26,6 +26,7 @@ from src.clustering.preprocessing import (
     build_long_stay_preprocessor,
     build_train_with_latest_intake,
     find_intake_csv,
+    normalize_intake_column_names,
     validate_columns,
 )
 
@@ -569,7 +570,7 @@ def run_long_stay_workflow(
 
     intake_csv = intake_csv or find_intake_csv()
     train = pd.read_csv(train_csv)
-    intakes = pd.read_csv(intake_csv)
+    intakes = normalize_intake_column_names(pd.read_csv(intake_csv))
     validate_columns(train, ["AnimalID", "DateTime", "OutcomeType", "AnimalType"], train_csv.name)
     validate_columns(
         intakes,
@@ -602,6 +603,24 @@ def run_long_stay_workflow(
     plot_duration_boxplots(clustered, plot_paths["Numerical duration boxplots"])
     plot_duration_bins(clustered, plot_paths["Categorical duration bins"])
     write_long_stay_report(results, enriched, clustering_frame, plot_paths, output_dir / REPORT_PATH.name)
+
+    from src.clustering.pca_kmeans_comparison import run_pca_kmeans_comparison
+    from src.clustering.pca_silhouette_validation import run_pca_silhouette_validation
+    from src.clustering.pca_threshold_kmeans_comparison import run_pca_threshold_kmeans_comparison
+
+    run_pca_kmeans_comparison(clustering_frame, output_dir=output_dir)
+    run_pca_silhouette_validation(clustering_frame, output_dir=output_dir)
+    run_pca_threshold_kmeans_comparison(clustering_frame, output_dir=output_dir)
+
+    from src.clustering.final_cluster_profile_report import generate_final_cluster_profile_report
+
+    generate_final_cluster_profile_report(
+        clustering_frame=clustering_frame,
+        results=results,
+        clustered=clustered,
+        output_dir=output_dir,
+        plot_paths=plot_paths,
+    )
     return results, enriched, clustered
 
 
