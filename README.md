@@ -22,14 +22,26 @@ The goal is not to identify "easily adoptable animals" but to enable the early i
 
 ## 2. Dataset
 
-**Kaggle — Shelter Animal Outcomes** (Austin Animal Center, 2013-10 to 2016-02)
+**1. Kaggle — Shelter Animal Outcomes** (Austin Animal Center, 2013-10 to 2016-02)
 - 26,729 animal records
 - Categorical: `AnimalType`, `Breed`, `Color`, `SexuponOutcome`, `OutcomeType`
 - Numerical (derived): values engineered from `AgeuponOutcome` and `DateTime`
 - Missing values: `Name` 28.77%, `OutcomeSubtype` 50.93% — handled in preprocessing
 - Source: https://www.kaggle.com/competitions/shelter-animal-outcomes/data
 
-The dataset satisfies every project requirement: more than 10 rows and columns, a mixture of numerical and categorical variables, a meaningful amount of dirty data, applicability of scaling and encoding, and full coverage of classification, clustering, and k-fold cross validation.
+This outcome dataset is the primary source for the classification workflow. It provides the final shelter outcome label for each animal, but it does not contain the full intake-side context needed to estimate shelter duration or analyze long-stay risk.
+
+**2. Austin Animal Center Intakes** (Austin Animal Center open data)
+- Raw intake records for animals entering the shelter
+- Expected local filename pattern: `data/wter-evkm*.csv`
+- Key fields used in this project: `animal_id`, `datetime`, `intake_type`, `intake_condition`, `sex_upon_intake`, `age_upon_intake`, `animal_type`, `breed`, `color`, `found_location`
+- Source: https://data.austintexas.gov/resource/wter-evkm.csv
+
+The outcome and intake datasets are both produced by the Austin Animal Center and describe the same shelter animal population from two event perspectives: intake records describe when and how an animal entered the shelter, while outcome records describe how the shelter stay ended. We confirmed that matching `AnimalID` in the outcome dataset with `animal_id` in the intake dataset refers to the same animal.
+
+When an animal appears in the intake dataset multiple times, the project uses the latest intake record at or before the corresponding outcome timestamp. This creates one intake context per outcome row, avoids using future intake information, and allows `length_of_stay_days` to be derived from the matched intake time and outcome time.
+
+Together, the datasets satisfy every project requirement: more than 10 rows and columns, a mixture of numerical and categorical variables, a meaningful amount of dirty data, applicability of scaling and encoding, and full coverage of classification, clustering, and k-fold cross validation.
 
 ---
 
@@ -110,4 +122,4 @@ python main.py
 ## 8. Notes
 
 - Academic term project, non-commercial use.
-- Data source: Austin Animal Center (Kaggle distribution). Per Kaggle Competition Rules 7.b the dataset is not redistributed; `.gitignore` excludes `data/*.csv` automatically.
+- Data sources: Austin Animal Center outcome data via Kaggle and Austin Animal Center intake open data. Per Kaggle Competition Rules 7.b, the Kaggle dataset is not redistributed; `.gitignore` excludes `data/*.csv` automatically.
