@@ -22,7 +22,7 @@ The goal is not to identify "easily adoptable animals" but to enable the early i
 
 ## 2. Dataset
 
-**Kaggle — Shelter Animal Outcomes** (Austin Animal Center, 2013-10 to 2016-02)
+**1. Kaggle — Shelter Animal Outcomes** (Austin Animal Center, 2013-10 to 2016-02)
 - 26,729 animal records
 - Categorical: `AnimalType`, `Breed`, `Color`, `SexuponOutcome`, `OutcomeType`
 - Numerical (derived): values engineered from `AgeuponOutcome` and `DateTime`
@@ -31,7 +31,7 @@ The goal is not to identify "easily adoptable animals" but to enable the early i
 
 This outcome dataset is the primary source for the classification workflow. It provides the final shelter outcome label for each animal, but it does not contain the full intake-side context needed to estimate shelter duration or analyze long-stay risk.
 
-**Austin Animal Center Intakes** (Austin Animal Center open data)
+**2. Austin Animal Center Intakes** (Austin Animal Center open data)
 - Raw intake records for animals entering the shelter
 - Expected local filename pattern: `data/wter-evkm*.csv`
 - Key fields used in this project: `animal_id`, `datetime`, `intake_type`, `intake_condition`, `sex_upon_intake`, `age_upon_intake`, `animal_type`, `breed`, `color`, `found_location`
