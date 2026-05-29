@@ -1,11 +1,11 @@
 # Preprocessing Verification Report
 
-Generated at (UTC): 2026-05-25T08:06:49+00:00
+Generated at (UTC): 2026-05-29T16:07:11+00:00
 Input file: `data/train.csv`
 
 ## Input shape
 
-- X.shape = (26729, 7)
+- X.shape = (26729, 6)
 - y.shape = (26729,)
 - Target classes = ['Adoption', 'Died', 'Euthanasia', 'Return_to_owner', 'Transfer']
 
@@ -27,16 +27,15 @@ Input file: `data/train.csv`
 
 ## Pipeline output
 
-- Transformed shape: (26729, 83)
+- Transformed shape: (26729, 74)
 - Dtype: float64
-- Numeric columns (including target encoded): 13
-- OneHot expanded columns: 70
-- Total columns: 83
+- Numeric columns (including target encoded): 8
+- OneHot expanded columns: 66
+- Total columns: 74
 
 ## Categorical columns sent to OneHot
 
 - `animal_type`
-- `outcome_season`
 - `sex`
 - `neuter_status`
 - `primary_color`
@@ -45,10 +44,10 @@ Input file: `data/train.csv`
 
 ## Transformed sample (first 5 rows, first 10 columns)
 
-| has_name | age_days | outcome_year | outcome_month | outcome_dayofweek | outcome_hour | outcome_is_weekend | is_mixed_breed | breed_te_Adoption | breed_te_Died |
+| has_name | age_days | is_mixed_breed | breed_te_Adoption | breed_te_Died | breed_te_Euthanasia | breed_te_Return_to_owner | breed_te_Transfer | animal_type_Cat | animal_type_Dog |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0.6356 | -0.3962 | -0.5810 | -1.4090 | -0.5408 | 1.0651 | -0.6926 | 0.2343 | -0.7400 | -0.7017 |
-| 0.6356 | -0.3962 | -1.9298 | 0.8794 | 1.4143 | -0.7328 | 1.4439 | 0.2343 | -0.4970 | 1.0053 |
-| 0.6356 | -0.0590 | 0.7678 | -1.6951 | 0.9255 | -0.7328 | 1.4439 | 0.2343 | -1.7992 | -0.7738 |
-| -1.5733 | -0.7139 | -0.5810 | 0.0212 | 0.4368 | 1.3648 | -0.6926 | 0.2343 | -0.4970 | 1.0053 |
-| -1.5733 | -0.0590 | -1.9298 | 1.1655 | 0.4368 | -0.7328 | -0.6926 | 0.2343 | -3.2251 | 0.7076 |
+| 0.6356 | -0.3962 | 0.2343 | -0.7400 | -0.7017 | 0.2962 | 0.8651 | -0.4875 | 0.0000 | 1.0000 |
+| 0.6356 | -0.3962 | 0.2343 | -0.4970 | 1.0053 | 0.0316 | -1.1564 | 1.2584 | 1.0000 | 0.0000 |
+| 0.6356 | -0.0590 | 0.2343 | -1.7992 | -0.7738 | 2.7625 | 1.3538 | -0.9915 | 0.0000 | 1.0000 |
+| -1.5733 | -0.7139 | 0.2343 | -0.4970 | 1.0053 | 0.0316 | -1.1564 | 1.2584 | 1.0000 | 0.0000 |
+| -1.5733 | -0.0590 | 0.2343 | -3.2251 | 0.7076 | -1.0223 | 0.5844 | 1.1913 | 0.0000 | 1.0000 |

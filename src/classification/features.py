@@ -21,7 +21,6 @@ FORBIDDEN_MODEL_INPUT_COLUMNS = [
 
 RAW_FEATURE_COLUMNS = [
     "Name",
-    "DateTime",
     "AnimalType",
     "SexuponOutcome",
     "AgeuponOutcome",
@@ -35,16 +34,10 @@ LABEL_ORDER = ["Adoption", "Died", "Euthanasia", "Return_to_owner", "Transfer"]
 ENGINEERED_NUMERIC_COLUMNS = [
     "has_name",
     "age_days",
-    "outcome_year",
-    "outcome_month",
-    "outcome_dayofweek",
-    "outcome_hour",
-    "outcome_is_weekend",
     "is_mixed_breed",
 ]
 ENGINEERED_CATEGORICAL_COLUMNS = [
     "animal_type",
-    "outcome_season",
     "sex",
     "neuter_status",
     "primary_breed",
@@ -82,20 +75,6 @@ def _age_to_days(value: object) -> float:
         return float(amount * 365)
     return float("nan")
 
-
-def _season_from_month(month: object) -> str:
-    if pd.isna(month):
-        return "Unknown"
-    m = int(month)
-    if m in (12, 1, 2):
-        return "winter"
-    if m in (3, 4, 5):
-        return "spring"
-    if m in (6, 7, 8):
-        return "summer"
-    if m in (9, 10, 11):
-        return "fall"
-    return "Unknown"
 
 
 def _split_sexuponoutcome(value: object) -> tuple[str, str]:
@@ -173,16 +152,6 @@ def engineer_features(raw_features: pd.DataFrame) -> pd.DataFrame:
     )
 
     out["age_days"] = raw["AgeuponOutcome"].map(_age_to_days)
-
-    # Invalid timestamps stay as NaN; the imputer inside the fold will fill them.
-    dt = pd.to_datetime(raw["DateTime"], errors="coerce")
-    out["outcome_year"] = dt.dt.year
-    out["outcome_month"] = dt.dt.month
-    out["outcome_dayofweek"] = dt.dt.dayofweek
-    out["outcome_hour"] = dt.dt.hour
-    out["outcome_is_weekend"] = dt.dt.dayofweek.isin([5, 6]).astype(int)
-    out.loc[dt.isna(), "outcome_is_weekend"] = pd.NA
-    out["outcome_season"] = out["outcome_month"].map(_season_from_month)
 
     sex_status = raw["SexuponOutcome"].map(_split_sexuponoutcome)
     out["sex"] = sex_status.map(lambda item: item[0])
