@@ -11,6 +11,7 @@ from sklearn.pipeline import Pipeline
 from src.classification.features import (
     FORBIDDEN_MODEL_INPUT_COLUMNS,
     TARGET_COLUMN,
+    load_merged_data,
 )
 from src.classification.preprocessing import build_preprocessing_pipeline
 
@@ -73,7 +74,7 @@ def run_final_training(df: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    _df = pd.read_csv("data/train.csv")
+    _df = load_merged_data("data/train.csv", "data/wter-evkm.csv")
     print("=" * 60)
     print("Hold-out Training & Evaluation  (tuned hyperparameters)")
     print("=" * 60)

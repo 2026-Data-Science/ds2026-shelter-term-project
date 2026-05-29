@@ -11,9 +11,10 @@ from src.classification.preprocessing import build_preprocessing_pipeline
 from src.classification.features import (
     TARGET_COLUMN,
     FORBIDDEN_MODEL_INPUT_COLUMNS,
+    load_merged_data,
 )
 
-df = pd.read_csv("data/train.csv")
+df = load_merged_data("data/train.csv", "data/wter-evkm.csv")
 
 # Drop columns that are not allowed as model input
 X = df.drop(
