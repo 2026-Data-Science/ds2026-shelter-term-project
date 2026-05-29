@@ -15,6 +15,7 @@ from src.classification.features import (
     TARGET_COLUMN,
     TRAIN_ID_COLUMN,
     engineer_features,
+    load_merged_data,
 )
 from src.classification.train import run_final_training
 from src.classification.validation import run_cross_validation
@@ -45,6 +46,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
+INTAKE_CSV = PROJECT_ROOT / "data" / "wter-evkm.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
 
 # ---------------------------------------------------------------------------
@@ -62,12 +64,18 @@ def _load_raw_df() -> pd.DataFrame:
     return pd.read_csv(TRAIN_CSV)
 
 
-def _load_train() -> tuple[pd.DataFrame, pd.Series]:
-    df = _load_raw_df()
+def _load_classification_df() -> pd.DataFrame:
+    if not INTAKE_CSV.exists():
+        sys.stderr.write(f"[main.py] '{INTAKE_CSV}' is missing.\n")
+        sys.exit(1)
+    return load_merged_data(str(TRAIN_CSV), str(INTAKE_CSV))
+
+
+def _load_train(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     required = [*RAW_FEATURE_COLUMNS, TARGET_COLUMN, TRAIN_ID_COLUMN, *LEAKAGE_COLUMNS]
     missing = [col for col in required if col not in df.columns]
     if missing:
-        sys.stderr.write(f"[main.py] train.csv schema mismatch. Missing columns: {missing}\n")
+        sys.stderr.write(f"[main.py] merged data schema mismatch. Missing columns: {missing}\n")
         sys.exit(2)
     X = df[RAW_FEATURE_COLUMNS].copy()
     y = df[TARGET_COLUMN].copy()
@@ -283,10 +291,10 @@ def run_classification() -> None:
     print("Classification — end-to-end pipeline")
     print("=" * 60)
 
-    df = _load_raw_df()
-    _run_data_inspection(df, step="1/4")
+    _run_data_inspection(_load_raw_df(), step="1/4")
 
-    X, y = _load_train()
+    df = _load_classification_df()
+    X, y = _load_train(df)
     _run_preprocessing_check(X, y)
 
     print()
