@@ -23,7 +23,6 @@ _FINAL_MODELS: dict = {
         max_iter=2000,
         solver="lbfgs",
         random_state=42,
-        n_jobs=-1,
     ),
     "RandomForest": RandomForestClassifier(
         n_estimators=300,

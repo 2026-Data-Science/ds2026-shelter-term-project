@@ -21,8 +21,7 @@ _CV_MODELS: dict = {
         random_state=42,
         class_weight="balanced",
         solver="lbfgs",
-        n_jobs=-1,
-    ),
+        ),
     "RandomForest": RandomForestClassifier(
         n_estimators=200,
         random_state=42,
