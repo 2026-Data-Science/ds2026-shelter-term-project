@@ -1,3 +1,11 @@
+"""Pre-tuning baseline check: 5-fold stratified CV for the three candidate models.
+
+Runs Dummy / LogisticRegression / RandomForest with default (untuned) settings
+through the shared preprocessing pipeline and reports mean +/- std for accuracy,
+macro F1 and weighted F1. This establishes the baseline that the tuned models in
+`train_using_gridsearch.py` must beat.
+"""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -38,16 +46,19 @@ _SCORING = {
 
 
 def run_cross_validation(df: pd.DataFrame) -> None:
+    # Drop ID/target/leakage columns; keep raw features for the pipeline to engineer.
     X = df.drop(
         columns=[col for col in FORBIDDEN_MODEL_INPUT_COLUMNS if col in df.columns]
     )
     y = df[TARGET_COLUMN]
 
+    # Stratified folds preserve the rare-class ratios (e.g. Died) in each split.
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     results = []
     for model_name, classifier in _CV_MODELS.items():
         print(f"\nEvaluating {model_name}...")
+        # Preprocessing is refit inside each fold, so no target info leaks across folds.
         model = Pipeline([
             ("preprocessing", build_preprocessing_pipeline()),
             ("classifier", classifier),
