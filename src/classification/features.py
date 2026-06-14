@@ -23,8 +23,8 @@ RAW_FEATURE_COLUMNS = [
     "Name",
     "DateTime",
     "AnimalType",
-    "SexuponOutcome",
-    "AgeuponOutcome",
+    "SexuponIntake",
+    "AgeuponIntake",
     "Breed",
     "Color",
 ]
@@ -35,16 +35,16 @@ LABEL_ORDER = ["Adoption", "Died", "Euthanasia", "Return_to_owner", "Transfer"]
 ENGINEERED_NUMERIC_COLUMNS = [
     "has_name",
     "age_days",
-    "outcome_year",
-    "outcome_month",
-    "outcome_dayofweek",
-    "outcome_hour",
-    "outcome_is_weekend",
+    "intake_year",
+    "intake_month",
+    "intake_dayofweek",
+    "intake_hour",
+    "intake_is_weekend",
     "is_mixed_breed",
 ]
 ENGINEERED_CATEGORICAL_COLUMNS = [
     "animal_type",
-    "outcome_season",
+    "intake_season",
     "sex",
     "neuter_status",
     "primary_breed",
@@ -98,7 +98,7 @@ def _season_from_month(month: object) -> str:
     return "Unknown"
 
 
-def _split_sexuponoutcome(value: object) -> tuple[str, str]:
+def _split_sex_neuter(value: object) -> tuple[str, str]:
     """Split the combined `sex` and `neuter_status` signals stored in one column."""
     if pd.isna(value):
         return "Unknown", "Unknown"
@@ -172,19 +172,18 @@ def engineer_features(raw_features: pd.DataFrame) -> pd.DataFrame:
         raw["AnimalType"].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     )
 
-    out["age_days"] = raw["AgeuponOutcome"].map(_age_to_days)
+    out["age_days"] = raw["AgeuponIntake"].map(_age_to_days)
 
-    # Invalid timestamps stay as NaN; the imputer inside the fold will fill them.
     dt = pd.to_datetime(raw["DateTime"], errors="coerce")
-    out["outcome_year"] = dt.dt.year
-    out["outcome_month"] = dt.dt.month
-    out["outcome_dayofweek"] = dt.dt.dayofweek
-    out["outcome_hour"] = dt.dt.hour
-    out["outcome_is_weekend"] = dt.dt.dayofweek.isin([5, 6]).astype(int)
-    out.loc[dt.isna(), "outcome_is_weekend"] = pd.NA
-    out["outcome_season"] = out["outcome_month"].map(_season_from_month)
+    out["intake_year"] = dt.dt.year
+    out["intake_month"] = dt.dt.month
+    out["intake_dayofweek"] = dt.dt.dayofweek
+    out["intake_hour"] = dt.dt.hour
+    out["intake_is_weekend"] = dt.dt.dayofweek.isin([5, 6]).astype(int)
+    out.loc[dt.isna(), "intake_is_weekend"] = pd.NA
+    out["intake_season"] = out["intake_month"].map(_season_from_month)
 
-    sex_status = raw["SexuponOutcome"].map(_split_sexuponoutcome)
+    sex_status = raw["SexuponIntake"].map(_split_sex_neuter)
     out["sex"] = sex_status.map(lambda item: item[0])
     out["neuter_status"] = sex_status.map(lambda item: item[1])
 
@@ -205,3 +204,39 @@ def _validate_engineered(frame: pd.DataFrame) -> None:
     missing = [col for col in ENGINEERED_FEATURE_COLUMNS if col not in frame.columns]
     if missing:
         raise ValueError(f"Missing engineered columns: {missing}")
+
+
+def load_merged_data(outcome_path: str, intake_path: str) -> pd.DataFrame:
+    """outcome 데이터와 intake 데이터를 AnimalID 기준으로 inner join.
+
+    SexuponOutcome, AgeuponOutcome, DateTime(outcome) 대신
+    intake의 SexuponIntake, AgeuponIntake, DateTime(intake)을 사용한다.
+    동물당 여러 intake 기록이 있을 경우 outcome 날짜 이전의 가장 최근 기록을 선택한다.
+    """
+    outcome = pd.read_csv(outcome_path)
+    intake = pd.read_csv(intake_path)
+
+    intake = intake.rename(columns={"animal_id": "AnimalID"})
+    intake["datetime"] = pd.to_datetime(intake["datetime"], errors="coerce")
+    outcome["_outcome_dt"] = pd.to_datetime(outcome["DateTime"], errors="coerce")
+
+    merged = outcome.merge(
+        intake[["AnimalID", "sex_upon_intake", "age_upon_intake", "datetime"]],
+        on="AnimalID",
+        how="inner",
+    )
+    merged = merged[merged["datetime"] <= merged["_outcome_dt"]]
+    merged = (
+        merged.sort_values("datetime", ascending=False)
+        .drop_duplicates(subset="AnimalID")
+        .reset_index(drop=True)
+    )
+    return (
+        merged
+        .drop(columns=["DateTime", "_outcome_dt", "SexuponOutcome", "AgeuponOutcome"])
+        .rename(columns={
+            "sex_upon_intake": "SexuponIntake",
+            "age_upon_intake": "AgeuponIntake",
+            "datetime": "DateTime",
+        })
+    )

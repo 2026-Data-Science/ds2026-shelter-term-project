@@ -10,6 +10,7 @@ from sklearn.pipeline import Pipeline
 from src.classification.features import (
     FORBIDDEN_MODEL_INPUT_COLUMNS,
     TARGET_COLUMN,
+    load_merged_data,
 )
 from src.classification.preprocessing import build_preprocessing_pipeline
 
@@ -20,8 +21,7 @@ _CV_MODELS: dict = {
         random_state=42,
         class_weight="balanced",
         solver="lbfgs",
-        n_jobs=-1,
-    ),
+        ),
     "RandomForest": RandomForestClassifier(
         n_estimators=200,
         random_state=42,
@@ -83,7 +83,7 @@ def run_cross_validation(df: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    _df = pd.read_csv("data/train.csv")
+    _df = load_merged_data("data/train.csv", "data/wter-evkm.csv")
     print("=" * 60)
     print("5-Fold Cross Validation  (pre-tuning exploration)")
     print("=" * 60)

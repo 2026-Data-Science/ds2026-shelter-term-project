@@ -1,7 +1,7 @@
 import pandas as pd
 
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, f1_score
@@ -11,9 +11,10 @@ from src.classification.preprocessing import build_preprocessing_pipeline
 from src.classification.features import (
     TARGET_COLUMN,
     FORBIDDEN_MODEL_INPUT_COLUMNS,
+    load_merged_data,
 )
 
-df = pd.read_csv("data/train.csv")
+df = load_merged_data("data/train.csv", "data/wter-evkm.csv")
 
 # Drop columns that are not allowed as model input
 X = df.drop(
@@ -22,6 +23,8 @@ X = df.drop(
 
 # Target variable
 y = df[TARGET_COLUMN]
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 X_train, X_test, y_train, y_test = train_test_split(
     X,
@@ -40,13 +43,11 @@ models = {
         random_state=42,
         class_weight="balanced",
         solver="lbfgs", # 대규모 데이터셋에 적합한 최적화 알고리즘
-        n_jobs=-1
     ),
     "RandomForest": RandomForestClassifier(
-        n_estimators=200, # 트리 개수
         random_state=42,
-        class_weight="balanced", # 클래스 불균형 문제 보정
-        n_jobs=-1 # 병렬 처리
+        class_weight="balanced",
+        # n_jobs는 GridSearchCV에만 부여 — 중첩 병렬화 시 BSOD 유발
     )
 }
 
@@ -54,19 +55,20 @@ param_grids = {
     "DummyClassifier": {},
 
     "LogisticRegression": {
-        "classifier__C": [0.1, 1, 10],
+        "classifier__C": [0.01, 0.1, 1, 10],
         "classifier__class_weight": [None, "balanced"],
     },
 
-    # 파라미터 범위는 최대한 다양하게 잡되, 너무 넓으면 튜닝 시간이 오래 걸리므로 나눠서 진행하였습니다.
     "RandomForest": {
-        "classifier__n_estimators": [300, 600], # 100, 200, 300, 500, 600 시도
-        "classifier__max_depth": [None, 10, 20], 
-        "classifier__min_samples_split": [2, 5], # 2, 5, 10 시도
-        "classifier__min_samples_leaf": [1, 2, 5, 10], # 1, 2, 5, 10 시도
-        # 위 파라미터들 중 최적의 조합 찾은 뒤, class별로 가중치 조정을 시도해보았으나 
-        # balanced가 항상 더 좋게 나와서 최종적으로는 balanced로 고정하였습니다.
-        "classifier__class_weight": [None, "balanced"], 
+        # 108 조합 → 36 조합 (× 5 fold = 180 fits)
+        # n_estimators: 200 이상은 성능 향상 미미, 300·500은 시간만 소모
+        "classifier__n_estimators": [100, 200],
+        # max_depth: 얕음·중간·무제한 세 구간으로 충분히 커버
+        "classifier__max_depth": [10, 20, None],
+        # min_samples_leaf: min_samples_split보다 영향 큼 — 이쪽에 집중
+        "classifier__min_samples_leaf": [1, 2, 4],
+        # max_features: sqrt vs 30% 두 극단으로 피처 다양성 탐색
+        "classifier__max_features": ["sqrt", 0.3],
     }
 }
 
@@ -92,7 +94,7 @@ for model_name, classifier in models.items():
             estimator=model,
             param_grid=param_grids[model_name],
             scoring="f1_macro",
-            cv=5,
+            cv=cv,
             n_jobs=-1,
             verbose=2
         )

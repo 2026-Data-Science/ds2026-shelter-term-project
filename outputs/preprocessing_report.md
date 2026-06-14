@@ -1,33 +1,33 @@
 # Preprocessing Verification Report
 
-Generated at (UTC): 2026-05-25T08:06:49+00:00
+Generated at (UTC): 2026-05-30T10:01:50+00:00
 Input file: `data/train.csv`
 
 ## Input shape
 
-- X.shape = (26729, 7)
-- y.shape = (26729,)
+- X.shape = (26064, 7)
+- y.shape = (26064,)
 - Target classes = ['Adoption', 'Died', 'Euthanasia', 'Return_to_owner', 'Transfer']
 
 ## Class proportions
 
 | Class | Count | Ratio |
 |-------|-------|-------|
-| Adoption | 10769 | 40.29% |
-| Died | 197 | 0.74% |
-| Euthanasia | 1555 | 5.82% |
-| Return_to_owner | 4786 | 17.91% |
-| Transfer | 9422 | 35.25% |
+| Adoption | 10381 | 39.83% |
+| Died | 189 | 0.73% |
+| Euthanasia | 1529 | 5.87% |
+| Return_to_owner | 4749 | 18.22% |
+| Transfer | 9216 | 35.36% |
 
 ## Cardinality flow (primary_breed)
 
-- Raw `Breed` unique values: **1380**
-- After rule-based simplification (`primary_breed`): **220**
+- Raw `Breed` unique values: **1371**
+- After rule-based simplification (`primary_breed`): **219**
 - After target encoding: **5 numeric columns** (`breed_te_*`)
 
 ## Pipeline output
 
-- Transformed shape: (26729, 83)
+- Transformed shape: (26064, 83)
 - Dtype: float64
 - Numeric columns (including target encoded): 13
 - OneHot expanded columns: 70
@@ -36,7 +36,7 @@ Input file: `data/train.csv`
 ## Categorical columns sent to OneHot
 
 - `animal_type`
-- `outcome_season`
+- `intake_season`
 - `sex`
 - `neuter_status`
 - `primary_color`
@@ -45,10 +45,10 @@ Input file: `data/train.csv`
 
 ## Transformed sample (first 5 rows, first 10 columns)
 
-| has_name | age_days | outcome_year | outcome_month | outcome_dayofweek | outcome_hour | outcome_is_weekend | is_mixed_breed | breed_te_Adoption | breed_te_Died |
+| has_name | age_days | intake_year | intake_month | intake_dayofweek | intake_hour | intake_is_weekend | is_mixed_breed | breed_te_Adoption | breed_te_Died |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0.6356 | -0.3962 | -0.5810 | -1.4090 | -0.5408 | 1.0651 | -0.6926 | 0.2343 | -0.7400 | -0.7017 |
-| 0.6356 | -0.3962 | -1.9298 | 0.8794 | 1.4143 | -0.7328 | 1.4439 | 0.2343 | -0.4970 | 1.0053 |
-| 0.6356 | -0.0590 | 0.7678 | -1.6951 | 0.9255 | -0.7328 | 1.4439 | 0.2343 | -1.7992 | -0.7738 |
-| -1.5733 | -0.7139 | -0.5810 | 0.0212 | 0.4368 | 1.3648 | -0.6926 | 0.2343 | -0.4970 | 1.0053 |
-| -1.5733 | -0.0590 | -1.9298 | 1.1655 | 0.4368 | -0.7328 | -0.6926 | 0.2343 | -3.2251 | 0.7076 |
+| -1.5610 | -0.3857 | 2.2069 | -1.4136 | 1.5309 | 0.4819 | 1.5851 | 0.2355 | -0.5372 | 1.0015 |
+| 0.6406 | 0.2886 | 2.2069 | -1.4136 | 1.5309 | -0.4968 | 1.5851 | -4.2456 | -0.3312 | -0.3404 |
+| 0.6406 | -0.3857 | 2.2069 | -1.4136 | 1.5309 | -0.4968 | 1.5851 | 0.2355 | 0.2370 | -0.5128 |
+| 0.6406 | 1.9745 | 2.2069 | -1.4136 | 1.0292 | 1.4606 | 1.5851 | 0.2355 | 0.7498 | -1.2424 |
+| 0.6406 | -0.0485 | 2.2069 | -1.4136 | 1.0292 | 1.1344 | 1.5851 | 0.2355 | 1.2485 | -0.6062 |

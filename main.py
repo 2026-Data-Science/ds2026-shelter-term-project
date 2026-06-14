@@ -15,6 +15,7 @@ from src.classification.features import (
     TARGET_COLUMN,
     TRAIN_ID_COLUMN,
     engineer_features,
+    load_merged_data,
 )
 from src.classification.train import run_final_training
 from src.classification.validation import run_cross_validation
@@ -45,6 +46,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
+INTAKE_CSV = PROJECT_ROOT / "data" / "wter-evkm.csv"
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
 
 # ---------------------------------------------------------------------------
@@ -62,12 +64,18 @@ def _load_raw_df() -> pd.DataFrame:
     return pd.read_csv(TRAIN_CSV)
 
 
-def _load_train() -> tuple[pd.DataFrame, pd.Series]:
-    df = _load_raw_df()
+def _load_classification_df() -> pd.DataFrame:
+    if not INTAKE_CSV.exists():
+        sys.stderr.write(f"[main.py] '{INTAKE_CSV}' is missing.\n")
+        sys.exit(1)
+    return load_merged_data(str(TRAIN_CSV), str(INTAKE_CSV))
+
+
+def _load_train(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     required = [*RAW_FEATURE_COLUMNS, TARGET_COLUMN, TRAIN_ID_COLUMN, *LEAKAGE_COLUMNS]
     missing = [col for col in required if col not in df.columns]
     if missing:
-        sys.stderr.write(f"[main.py] train.csv schema mismatch. Missing columns: {missing}\n")
+        sys.stderr.write(f"[main.py] merged data schema mismatch. Missing columns: {missing}\n")
         sys.exit(2)
     X = df[RAW_FEATURE_COLUMNS].copy()
     y = df[TARGET_COLUMN].copy()
@@ -206,10 +214,61 @@ def _run_data_inspection(df: pd.DataFrame, step: str = "1/4") -> None:
     print(df.describe(include="all").to_string())
 
 
+def _run_merged_inspection(df: pd.DataFrame, outcome_path: Path, step: str = "2/5") -> None:
+    outcome_rows = len(pd.read_csv(outcome_path))
+    merged_rows = len(df)
+
+    print()
+    print("=" * 60)
+    print(f"STEP {step}  Merged dataset inspection  (outcome ⋈ intake)")
+    print("=" * 60)
+
+    print(f"Outcome rows (train.csv)  : {outcome_rows:,}")
+    print(f"Merged rows (inner join)  : {merged_rows:,}")
+    print(f"Dropped (no intake match) : {outcome_rows - merged_rows:,}  "
+          f"({(outcome_rows - merged_rows) / outcome_rows * 100:.1f}%)")
+    print()
+
+    print(f"Shape: {df.shape}  ({merged_rows} rows, {df.shape[1]} columns)")
+    print()
+
+    print("--- dtypes ---")
+    print(df.dtypes.to_string())
+    print()
+
+    intake_cols = ["SexuponIntake", "AgeuponIntake", "DateTime"]
+    for col in intake_cols:
+        if col in df.columns:
+            print(f"--- {col} (intake-based) ---")
+            if df[col].dtype == object or df[col].nunique() <= 20:
+                print(df[col].value_counts(dropna=False).to_string())
+            else:
+                print(df[col].describe().to_string())
+            print()
+
+    print("--- Missing values ---")
+    missing = df.isnull().sum()
+    missing_pct = (missing / merged_rows * 100).round(2)
+    missing_df = pd.DataFrame(
+        {"missing_count": missing, "missing_pct": missing_pct}
+    )
+    has_missing = missing_df[missing_df["missing_count"] > 0]
+    if has_missing.empty:
+        print("  (no missing values)")
+    else:
+        print(has_missing.to_string())
+    print()
+
+    print("--- head(5) ---")
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+    print(df.head().to_string())
+
+
 def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
     print()
     print("=" * 60)
-    print("STEP 2/4  Preprocessing verification")
+    print("STEP 3/5  Preprocessing verification")
     print("=" * 60)
 
     print(f"[1/4] Loaded train.csv : X.shape={X.shape}, y.shape={y.shape}")
@@ -283,21 +342,23 @@ def run_classification() -> None:
     print("Classification — end-to-end pipeline")
     print("=" * 60)
 
-    df = _load_raw_df()
-    _run_data_inspection(df, step="1/4")
+    _run_data_inspection(_load_raw_df(), step="1/5")
 
-    X, y = _load_train()
+    df = _load_classification_df()
+    _run_merged_inspection(df, TRAIN_CSV, step="2/5")
+
+    X, y = _load_train(df)
     _run_preprocessing_check(X, y)
 
     print()
     print("=" * 60)
-    print("STEP 3/4  5-Fold Cross Validation  (pre-tuning exploration)")
+    print("STEP 4/5  5-Fold Cross Validation  (pre-tuning exploration)")
     print("=" * 60)
     run_cross_validation(df)
 
     print()
     print("=" * 60)
-    print("STEP 4/4  Hold-out Training & Evaluation  (tuned hyperparameters)")
+    print("STEP 5/5  Hold-out Training & Evaluation  (tuned hyperparameters)")
     print("=" * 60)
     run_final_training(df)
 
