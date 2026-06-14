@@ -1,3 +1,13 @@
+"""Core long-stay clustering workflow: PCA + K-Means, profiling, plots, report.
+
+Orchestrates the whole clustering side end-to-end. For each species it encodes
+the duration-free features, reduces with PCA to a variance threshold, grid-searches
+K by silhouette, fits the final K-Means, then profiles clusters with post-hoc
+duration/outcome distributions and writes the markdown report and figures.
+`run_long_stay_workflow` is the top-level entry that also triggers the validation
+and comparison experiments.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -243,11 +253,13 @@ def run_species_long_stay_clustering(
     preprocessor = build_long_stay_preprocessor()
     encoded = _as_dense(preprocessor.fit_transform(frame))
 
+    # Fit full PCA, then keep just enough components to reach the variance threshold.
     pca = PCA(svd_solver="full", random_state=DEFAULT_RANDOM_STATE)
     full_reduced = pca.fit_transform(encoded)
     component_count = _select_pca_components(pca.explained_variance_ratio_)
     reduced = full_reduced[:, :component_count]
 
+    # Pick K by best sampled silhouette (ties broken by smaller K).
     candidate_scores = _score_kmeans(reduced)
     selected_row = candidate_scores.sort_values(
         by=["silhouette_sample", "k"],
@@ -255,6 +267,7 @@ def run_species_long_stay_clustering(
     ).iloc[0]
     selected_k = int(selected_row["k"])
 
+    # Refit K-Means at the chosen K to assign final cluster labels.
     final_model = KMeans(n_clusters=selected_k, random_state=DEFAULT_RANDOM_STATE, n_init=20)
     frame["cluster"] = final_model.fit_predict(reduced)
 
@@ -306,6 +319,7 @@ def run_long_stay_clustering(frame: pd.DataFrame) -> tuple[dict[str, SpeciesLong
     """Run long-stay clustering separately for Cat and Dog subsets."""
     results: dict[str, SpeciesLongStayClusteringResult] = {}
     clustered_frames: list[pd.DataFrame] = []
+    # Cluster Cats and Dogs separately so species does not dominate the split.
     for species in ["Cat", "Dog"]:
         subset = frame[frame["AnimalType"].astype(str) == species].copy()
         if subset.empty:
@@ -604,6 +618,7 @@ def run_long_stay_workflow(
     plot_duration_bins(clustered, plot_paths["Categorical duration bins"])
     write_long_stay_report(results, enriched, clustering_frame, plot_paths, output_dir / REPORT_PATH.name)
 
+    # Run the supplementary PCA validation / comparison experiments (report-only).
     from src.clustering.pca_kmeans_comparison import run_pca_kmeans_comparison
     from src.clustering.pca_silhouette_validation import run_pca_silhouette_validation
     from src.clustering.pca_threshold_kmeans_comparison import run_pca_threshold_kmeans_comparison
