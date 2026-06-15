@@ -1,3 +1,11 @@
+"""Final training and reporting step using the tuned hyperparameters.
+
+Fits Dummy / LogisticRegression / RandomForest on an 80/20 stratified split,
+prints the model comparison and per-class report, and saves the three report
+figures for the RandomForest model: per-class metrics, confusion matrix, and
+top-15 feature importances.
+"""
+
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
@@ -17,6 +25,7 @@ from src.classification.features import (
 )
 from src.classification.preprocessing import build_preprocessing_pipeline
 
+# Final models with the best hyperparameters found by the grid search.
 _FINAL_MODELS: dict = {
     "DummyClassifier": DummyClassifier(strategy="most_frequent"),
     "LogisticRegression": LogisticRegression(
@@ -39,10 +48,12 @@ _FINAL_MODELS: dict = {
 
 
 def run_final_training(df: pd.DataFrame) -> None:
+    # Remove ID/target/leakage columns before modelling.
     drop_cols = [col for col in FORBIDDEN_MODEL_INPUT_COLUMNS if col in df.columns]
     X = df.drop(columns=drop_cols)
     y = df[TARGET_COLUMN]
 
+    # Same 80/20 stratified split (seed 42) as the grid search for a comparable hold-out.
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=42
     )
@@ -52,6 +63,7 @@ def run_final_training(df: pd.DataFrame) -> None:
     results = []
     y_pred_rf = None
     rf_pipeline = None
+    # Train each model and collect accuracy / macro F1 / weighted F1 on the hold-out.
     for model_name, classifier in _FINAL_MODELS.items():
         print(f"\nTraining {model_name}...")
         model = Pipeline([
@@ -63,6 +75,7 @@ def run_final_training(df: pd.DataFrame) -> None:
         print(f"Predicting with {model_name}...")
         pred = model.predict(X_test)
 
+        # Keep the RandomForest predictions/pipeline aside for the report figures.
         if model_name == "RandomForest":
             y_pred_rf = pred
             rf_pipeline = model
@@ -83,6 +96,7 @@ def run_final_training(df: pd.DataFrame) -> None:
     if y_pred_rf is None:
         return
 
+    # Figure 1: per-class precision / recall / F1 bar chart for the RandomForest model.
     report = classification_report(
         y_test, y_pred_rf,
         labels=class_names,
@@ -107,6 +121,7 @@ def run_final_training(df: pd.DataFrame) -> None:
     plt.savefig("outputs/figure1_per_class_metrics.png", dpi=300)
     plt.show()
 
+    # Figure 2: confusion matrix showing where the misclassifications land.
     cm = confusion_matrix(y_test, y_pred_rf, labels=class_names)
     plt.figure(figsize=(8, 6))
     sns.heatmap(
@@ -121,6 +136,8 @@ def run_final_training(df: pd.DataFrame) -> None:
     plt.savefig("outputs/figure2_confusion_matrix.png", dpi=300)
     plt.show()
 
+    # Figure 3: top-15 RandomForest feature importances.
+    # Recover post-encoding feature names so importances can be labelled.
     feature_names = (
         rf_pipeline.named_steps["preprocessing"]
         .named_steps["preprocessor"]

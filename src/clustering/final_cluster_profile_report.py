@@ -1,3 +1,12 @@
+"""Section 5.5 report generator: profiles the final production clustering labels.
+
+Takes the already-fitted cluster labels and builds the report tables and figures:
+per-cluster profiles (top intake/breed/age, duration stats, long-stay ratios,
+outcome mix), long-stay candidate clusters per species, and the silhouette
+re-check in both PCA and full space. Re-emphasises that duration/outcome were
+used only for profiling, never for K-Means fitting.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -54,6 +63,7 @@ def _collect_production_settings(
     species_frame: pd.DataFrame,
     result: SpeciesLongStayClusteringResult,
 ) -> dict[str, object]:
+    # Re-encode and re-run PCA to recompute silhouette in both spaces on the same labels.
     preprocessor = build_long_stay_preprocessor()
     encoded = _as_dense(
         preprocessor.fit_transform(species_frame[NUMERIC_FEATURES + CATEGORICAL_FEATURES])
@@ -64,6 +74,7 @@ def _collect_production_settings(
     reduced = full_reduced[:, :n_components]
     labels = species_frame["cluster"].to_numpy(dtype=int)
     sample_size = _silhouette_sample_size(len(reduced))
+    # PCA-space silhouette: how separated the clusters look in the reduced embedding.
     sil_pca = float(
         silhouette_score(
             reduced,
@@ -72,6 +83,7 @@ def _collect_production_settings(
             random_state=DEFAULT_RANDOM_STATE,
         )
     )
+    # Full-space silhouette: the same labels scored against all encoded features.
     sil_full = float(
         silhouette_score(
             encoded,
@@ -141,6 +153,7 @@ def _build_cluster_profiles(clustered: pd.DataFrame) -> pd.DataFrame:
 
 def _long_stay_candidates(profiles: pd.DataFrame, species: str, top_n: int = 2) -> pd.DataFrame:
     subset = profiles[profiles["species"] == species].copy()
+    # Rank clusters by combined long-stay-30 ratio and median duration; lower score = stronger.
     subset["long_stay_rank_score"] = (
         subset["long_stay_30_ratio_pct"].rank(ascending=False, method="dense")
         + subset["duration_median_days"].rank(ascending=False, method="dense")

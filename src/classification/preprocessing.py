@@ -1,3 +1,12 @@
+"""Leakage-safe preprocessing pipeline for the classification model.
+
+Assembles three stages into one sklearn Pipeline: (1) feature engineering,
+(2) breed target encoding, and (3) numeric/categorical imputation + scaling +
+one-hot encoding. Because every fit-requiring step lives inside the Pipeline,
+cross-validation refits them on the training fold only, so no target information
+leaks from validation folds.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -57,10 +66,12 @@ class BreedTargetEncoder(BaseEstimator, TransformerMixin):
         prior = y.value_counts(normalize=True)
         self.prior_class_rates_ = {label: float(prior.get(label, 0.0)) for label in LABEL_ORDER}
 
+        # Count breed x class co-occurrences on the training fold.
         breed = X["primary_breed"].astype(str)
         crosstab = pd.crosstab(breed, y).reindex(columns=LABEL_ORDER, fill_value=0)
         row_totals = crosstab.sum(axis=1)
 
+        # Smoothed P(class|breed): blends each breed's counts with the global prior.
         encoding: dict[str, dict[str, float]] = {}
         for b, row in crosstab.iterrows():
             n = int(row_totals.loc[b])
@@ -81,6 +92,7 @@ class BreedTargetEncoder(BaseEstimator, TransformerMixin):
             raise ValueError("BreedTargetEncoder expects 'primary_breed' in input frame.")
 
         breed = X["primary_breed"].astype(str)
+        # Drop the raw breed column; it is replaced by the 5 numeric encoded columns.
         result = X.drop(columns=["primary_breed"]).copy()
 
         # Breeds unseen in the training fold fall back to the training-fold prior.
@@ -95,6 +107,7 @@ class BreedTargetEncoder(BaseEstimator, TransformerMixin):
 
 
 def build_column_preprocessor() -> ColumnTransformer:
+    # Numeric branch: median-impute (robust to skew), then standardize.
     # Median is robust against right-skewed columns such as age_days where the mean is dragged by outliers.
     numeric_pipeline = Pipeline(
         steps=[
@@ -102,6 +115,7 @@ def build_column_preprocessor() -> ColumnTransformer:
             ("scaler", StandardScaler()),
         ]
     )
+    # Categorical branch: mode-impute, then one-hot encode.
     # Ignore unseen categories during transform so a validation fold cannot break the pipeline.
     categorical_pipeline = Pipeline(
         steps=[

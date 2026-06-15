@@ -1,3 +1,22 @@
+"""Entry point for the data-science pipelines.
+
+How to run (execute all commands from the project root directory):
+
+    # Classification pipeline (inspect -> merge -> preprocess -> CV -> train)
+    python main.py classification
+
+    # Clustering pipeline (inspect -> long-stay risk clustering)
+    python main.py clustering
+
+To run a single module directly (use `-m`; the modules use `src.` imports):
+
+    python -m src.classification.validation   # 5-fold cross validation only
+    python -m src.classification.train        # hold-out training & evaluation
+    python -m src.clustering.analysis         # long-stay clustering workflow
+
+Requires data/train.csv and data/wter-evkm.csv to be present (see README).
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -38,22 +57,25 @@ from src.clustering.pca_threshold_kmeans_comparison import THRESHOLD_CSV, THRESH
 from src.clustering.final_cluster_profile_report import PROFILE_CSV, PROFILE_MD
 from src.clustering.preprocessing import ENRICHED_TRAIN_PATH
 
+# Force UTF-8 on stdout/stderr so non-ASCII output prints correctly on Windows.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 
+# Resolve key paths relative to this file so the runner works from any cwd.
 PROJECT_ROOT = Path(__file__).resolve().parent
-TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"
-INTAKE_CSV = PROJECT_ROOT / "data" / "wter-evkm.csv"
+TRAIN_CSV = PROJECT_ROOT / "data" / "train.csv"  # outcome data (labels)
+INTAKE_CSV = PROJECT_ROOT / "data" / "wter-evkm.csv"  # intake data to join
 REPORT_PATH = PROJECT_ROOT / "outputs" / "preprocessing_report.md"
 
 # ---------------------------------------------------------------------------
-# 데이터 로드
+# Data loading
 # ---------------------------------------------------------------------------
 
 def _load_raw_df() -> pd.DataFrame:
+    # Load the raw outcome dataset; exit with guidance if the file is absent.
     if not TRAIN_CSV.exists():
         sys.stderr.write(
             f"[main.py] '{TRAIN_CSV}' is missing.\n"
@@ -65,6 +87,7 @@ def _load_raw_df() -> pd.DataFrame:
 
 
 def _load_classification_df() -> pd.DataFrame:
+    # Inner-join outcome and intake data into the merged classification frame.
     if not INTAKE_CSV.exists():
         sys.stderr.write(f"[main.py] '{INTAKE_CSV}' is missing.\n")
         sys.exit(1)
@@ -72,6 +95,7 @@ def _load_classification_df() -> pd.DataFrame:
 
 
 def _load_train(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    # Validate the merged schema, then split into features X and target y.
     required = [*RAW_FEATURE_COLUMNS, TARGET_COLUMN, TRAIN_ID_COLUMN, *LEAKAGE_COLUMNS]
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -83,10 +107,11 @@ def _load_train(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
 
 
 # ---------------------------------------------------------------------------
-# 리포트 헬퍼
+# Report helpers
 # ---------------------------------------------------------------------------
 
 def _dataframe_to_markdown(df: pd.DataFrame) -> str:
+    # Render a DataFrame as a GitHub-flavored Markdown table (floats to 4dp).
     headers = [str(col) for col in df.columns]
     header_line = "| " + " | ".join(headers) + " |"
     separator = "| " + " | ".join("---" for _ in headers) + " |"
@@ -103,6 +128,7 @@ def _dataframe_to_markdown(df: pd.DataFrame) -> str:
 
 
 def _format_class_proportions(y: pd.Series) -> str:
+    # Build a fixed-order, aligned text summary of per-class counts and ratios.
     rows = []
     proportions = y.value_counts(normalize=True).reindex(LABEL_ORDER)
     for label in LABEL_ORDER:
@@ -122,6 +148,8 @@ def _write_report(
     numeric_count: int,
     sample_preview: pd.DataFrame,
 ) -> None:
+    # Write the Markdown preprocessing report: shapes, class balance, breed
+    # cardinality flow, pipeline output dimensions, and a transformed sample.
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -177,10 +205,11 @@ def _write_report(
 
 
 # ---------------------------------------------------------------------------
-# Classification 단계별 함수
+# Classification step-by-step functions
 # ---------------------------------------------------------------------------
 
 def _run_data_inspection(df: pd.DataFrame, step: str = "1/4") -> None:
+    # Print a quick EDA snapshot: shape, dtypes, head, missing, describe.
     print("=" * 60)
     print(f"STEP {step}  Dataset inspection")
     print("=" * 60)
@@ -215,6 +244,8 @@ def _run_data_inspection(df: pd.DataFrame, step: str = "1/4") -> None:
 
 
 def _run_merged_inspection(df: pd.DataFrame, outcome_path: Path, step: str = "2/5") -> None:
+    # Report how many outcome rows survived the inner join with intake data,
+    # then inspect dtypes, intake-derived columns, and missing values.
     outcome_rows = len(pd.read_csv(outcome_path))
     merged_rows = len(df)
 
@@ -236,6 +267,8 @@ def _run_merged_inspection(df: pd.DataFrame, outcome_path: Path, step: str = "2/
     print(df.dtypes.to_string())
     print()
 
+    # Summarize intake-based columns: value counts for low-cardinality/object
+    # columns, otherwise a numeric describe().
     intake_cols = ["SexuponIntake", "AgeuponIntake", "DateTime"]
     for col in intake_cols:
         if col in df.columns:
@@ -266,6 +299,8 @@ def _run_merged_inspection(df: pd.DataFrame, outcome_path: Path, step: str = "2/
 
 
 def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
+    # End-to-end sanity check of the preprocessing pipeline: fit_transform the
+    # features, assert shape/dtype invariants, and emit the Markdown report.
     print()
     print("=" * 60)
     print("STEP 3/5  Preprocessing verification")
@@ -285,12 +320,14 @@ def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
         "(compressed to 5 numeric columns via target encoding)"
     )
 
+    # Fit the pipeline and densify the output so we can inspect it as an array.
     pipeline = build_preprocessing_pipeline()
     transformed = pipeline.fit_transform(X, y)
     if hasattr(transformed, "toarray"):
         transformed = transformed.toarray()
     transformed = np.asarray(transformed)
 
+    # Count the expanded one-hot columns to verify the final column budget.
     onehot = (
         pipeline.named_steps["preprocessor"]
         .named_transformers_["categorical"]
@@ -309,6 +346,7 @@ def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
         f"total expected = {numeric_count + onehot_count}"
     )
 
+    # Invariants: rows must be preserved and the matrix must be fully numeric.
     assert transformed.shape[0] == len(X), "Row count was not preserved after transform."
     assert np.issubdtype(transformed.dtype, np.number), "Transformed matrix is not numeric."
 
@@ -317,6 +355,7 @@ def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
         f"(primary_breed is replaced by target encoding)"
     )
 
+    # Take a labeled 5x10 preview of the transformed matrix for the report.
     feature_names = pipeline.named_steps["preprocessor"].get_feature_names_out()
     preview = pd.DataFrame(transformed[:5, :10], columns=list(feature_names[:10]))
 
@@ -334,10 +373,11 @@ def _run_preprocessing_check(X: pd.DataFrame, y: pd.Series) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 모드별 진입점
+# Per-mode entry points
 # ---------------------------------------------------------------------------
 
 def run_classification() -> None:
+    # Full classification flow: inspect -> merge -> preprocess -> CV -> train.
     print("=" * 60)
     print("Classification — end-to-end pipeline")
     print("=" * 60)
@@ -369,6 +409,8 @@ def run_classification() -> None:
 
 
 def _run_clustering() -> None:
+    # Run the long-stay clustering workflow and print every artifact path it
+    # produced (enriched CSV, report, plots, and comparison/validation tables).
     print()
     print("=" * 60)
     print("STEP 2/2  Long-stay risk clustering")
@@ -442,6 +484,7 @@ def _run_clustering() -> None:
 
 
 def run_clustering() -> None:
+    # Full clustering flow: inspect raw data, then run clustering profiling.
     print("=" * 60)
     print("Clustering — end-to-end pipeline")
     print("=" * 60)
@@ -458,10 +501,11 @@ def run_clustering() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI 진입점
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Parse the required positional "mode" argument and dispatch to its runner.
     parser = argparse.ArgumentParser(
         description="Data-science end-to-end pipeline runner"
     )

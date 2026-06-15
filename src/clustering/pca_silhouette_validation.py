@@ -1,3 +1,12 @@
+"""Validation: check whether high PCA-space silhouette survives in full space.
+
+Focuses on the suspicious low-dimensional PCA settings (e.g. n_components=2) where
+clusters can look well separated along a couple of axes. For each configuration it
+scores silhouette in both the PCA-reduced and full encoded spaces, inspects PC
+loadings and cluster profiles, and writes a report explaining the gap. Production
+clustering is left unchanged.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -73,6 +82,7 @@ def _fit_labels(
     k: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Return (reduced_for_clustering, labels, explained_variance_ratio_sum)."""
+    # Build the clustering space according to the requested method, then fit K-Means.
     if method == "baseline":
         reduced = encoded
         return reduced, _kmeans_labels(reduced, k), 1.0
@@ -105,6 +115,7 @@ def _dual_silhouette(
     encoded: np.ndarray,
     labels: np.ndarray,
 ) -> tuple[float, float]:
+    # Score the same labels twice: in the PCA-reduced space and the full encoded space.
     sample_size = _silhouette_sample_size(len(reduced))
     silhouette_pca = float(
         silhouette_score(

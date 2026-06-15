@@ -1,3 +1,12 @@
+"""Data join, feature construction, and preprocessing for long-stay clustering.
+
+End-to-end intake side of the clustering pipeline: locate and normalize the
+Austin intake CSV, match each outcome row to its latest prior intake, derive
+length-of-stay, and build the duration-free feature frame plus the
+numeric/categorical preprocessor. Duration and outcome are deliberately kept out
+of the clustering inputs and reserved for post-hoc profiling.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -174,6 +183,7 @@ def _bucket_rare_categories_by_species(
 ) -> pd.Series:
     """Group rare categorical values within each species to reduce one-hot noise."""
     bucketed = frame[column].fillna("Unknown").astype(str).copy()
+    # Decide "keep vs Other" within each species, since breed frequencies differ by species.
     for _, species_index in frame.groupby("AnimalType").groups.items():
         species_values = bucketed.loc[species_index]
         ratios = species_values.value_counts(normalize=True)
@@ -197,6 +207,7 @@ def match_latest_previous_intake(train: pd.DataFrame, intakes: pd.DataFrame) -> 
     intakes["_intake_dt"] = pd.to_datetime(intakes["datetime"], errors="coerce")
     intakes["_intake_row"] = np.arange(len(intakes), dtype=int)
 
+    # Pre-sort each animal's intakes by date so the match becomes a fast binary search.
     intake_lookup: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for animal_id, group in intakes.dropna(subset=["_intake_dt"]).groupby("_animal_id"):
         ordered = group.sort_values("_intake_dt")
@@ -205,6 +216,7 @@ def match_latest_previous_intake(train: pd.DataFrame, intakes: pd.DataFrame) -> 
             ordered["_intake_row"].to_numpy(dtype=int),
         )
 
+    # For each outcome, pick the latest intake at or before the outcome time.
     matched_rows: list[float] = []
     for animal_id, outcome_dt in zip(train["_animal_id"], train["_outcome_dt"]):
         intake_values = intake_lookup.get(animal_id)
@@ -212,6 +224,7 @@ def match_latest_previous_intake(train: pd.DataFrame, intakes: pd.DataFrame) -> 
             matched_rows.append(np.nan)
             continue
         intake_dates, intake_rows = intake_values
+        # searchsorted(..., 'right') - 1 lands on the most recent intake not after the outcome.
         position = np.searchsorted(
             intake_dates,
             np.datetime64(outcome_dt.to_datetime64()),
@@ -273,6 +286,7 @@ def build_train_with_latest_intake(train: pd.DataFrame, intakes: pd.DataFrame) -
         on="AnimalID",
         how="left",
     )
+    # Length of stay = outcome time minus matched intake time, in days (and hours).
     outcome_dt = pd.to_datetime(enriched["DateTime"], errors="coerce")
     intake_dt = pd.to_datetime(enriched["intake_datetime"], errors="coerce")
     enriched["length_of_stay_days"] = (outcome_dt - intake_dt).dt.total_seconds() / 86400.0
@@ -290,12 +304,14 @@ def build_train_with_latest_intake(train: pd.DataFrame, intakes: pd.DataFrame) -
 def build_long_stay_clustering_frame(enriched: pd.DataFrame) -> pd.DataFrame:
     """Create clustering/profile features from train rows enriched with intake data."""
     frame = enriched.copy()
+    # Keep only rows with a valid, non-negative length of stay.
     frame = frame[frame["length_of_stay_days"].notna()].copy()
     frame = frame[frame["length_of_stay_days"].ge(0)].copy()
 
     name_clean = frame["Name"].fillna("").astype(str).str.strip()
     frame["has_name"] = (name_clean != "").astype(int)
 
+    # Prefer intake-time breed/color, falling back to outcome values when absent.
     breed_source = frame["intake_breed"].combine_first(frame["Breed"])
     color_source = frame["intake_color"].combine_first(frame["Color"])
     frame["primary_breed"] = breed_source.map(_primary_breed)
@@ -320,6 +336,7 @@ def build_long_stay_clustering_frame(enriched: pd.DataFrame) -> pd.DataFrame:
         bins=LOS_BINS,
         labels=LOS_LABELS,
     ).astype("object")
+    # Post-hoc binary flags used only for profiling, not for clustering.
     frame["long_stay_30"] = frame["length_of_stay_days"].gt(30).astype(int)
     frame["long_stay_60"] = frame["length_of_stay_days"].gt(60).astype(int)
     frame["long_stay_90"] = frame["length_of_stay_days"].gt(90).astype(int)

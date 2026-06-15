@@ -1,3 +1,13 @@
+"""Feature definitions and raw-to-engineered transforms for the classification model.
+
+This module is the single source of truth for which columns the model is allowed
+to see. It (1) declares the forbidden inputs (IDs, target, leakage column),
+(2) turns the 7 raw columns into the engineered feature set via `engineer_features`,
+and (3) builds the merged intake+outcome table via `load_merged_data`.
+No statistics are estimated here; everything is a pure, row-wise transform so it
+can safely run before any train/validation split.
+"""
+
 from __future__ import annotations
 
 import re
@@ -52,6 +62,7 @@ ENGINEERED_CATEGORICAL_COLUMNS = [
 ]
 ENGINEERED_FEATURE_COLUMNS = ENGINEERED_NUMERIC_COLUMNS + ENGINEERED_CATEGORICAL_COLUMNS
 
+# Matches an age string like "2 years" or "3 weeks" so it can be converted to days.
 _AGE_PATTERN = re.compile(
     r"^\s*(\d+)\s+(day|days|week|weeks|month|months|year|years)\s*$",
     re.IGNORECASE,
@@ -59,12 +70,14 @@ _AGE_PATTERN = re.compile(
 
 
 def assert_no_forbidden_model_inputs(frame: pd.DataFrame) -> None:
+    # Guard rail: fail loudly if an ID/target/leakage column ever reaches the model.
     forbidden = [col for col in FORBIDDEN_MODEL_INPUT_COLUMNS if col in frame.columns]
     if forbidden:
         raise ValueError(f"Forbidden model input columns detected: {forbidden}")
 
 
 def _age_to_days(value: object) -> float:
+    # Normalise mixed age units (days/weeks/months/years) onto a single day scale.
     if pd.isna(value):
         return float("nan")
     match = _AGE_PATTERN.match(str(value))
@@ -84,6 +97,7 @@ def _age_to_days(value: object) -> float:
 
 
 def _season_from_month(month: object) -> str:
+    # Collapse the intake month into a coarse seasonal signal.
     if pd.isna(month):
         return "Unknown"
     m = int(month)
@@ -147,6 +161,7 @@ def _is_mixed_breed(value: object) -> int:
 
 
 def _primary_color(value: object) -> str:
+    # Keep only the dominant color (token before the slash) to cut cardinality.
     if pd.isna(value):
         return "Unknown"
     text = str(value).strip()
@@ -156,6 +171,12 @@ def _primary_color(value: object) -> str:
 
 
 def engineer_features(raw_features: pd.DataFrame) -> pd.DataFrame:
+    """Turn the 7 raw columns into the fixed engineered feature schema.
+
+    Each raw column maps to one or more derived signals (presence flag, age in
+    days, calendar parts, split sex/neuter, simplified breed/color). The output
+    column set is validated at the end so downstream steps get a stable schema.
+    """
     assert_no_forbidden_model_inputs(raw_features)
     missing = [col for col in RAW_FEATURE_COLUMNS if col not in raw_features.columns]
     if missing:
@@ -174,6 +195,7 @@ def engineer_features(raw_features: pd.DataFrame) -> pd.DataFrame:
 
     out["age_days"] = raw["AgeuponIntake"].map(_age_to_days)
 
+    # Decompose the intake timestamp into calendar parts the model can use directly.
     dt = pd.to_datetime(raw["DateTime"], errors="coerce")
     out["intake_year"] = dt.dt.year
     out["intake_month"] = dt.dt.month
@@ -183,14 +205,17 @@ def engineer_features(raw_features: pd.DataFrame) -> pd.DataFrame:
     out.loc[dt.isna(), "intake_is_weekend"] = pd.NA
     out["intake_season"] = out["intake_month"].map(_season_from_month)
 
+    # One combined field holds both sex and neuter status; split into two signals.
     sex_status = raw["SexuponIntake"].map(_split_sex_neuter)
     out["sex"] = sex_status.map(lambda item: item[0])
     out["neuter_status"] = sex_status.map(lambda item: item[1])
 
+    # Simplify breed/color and add a mixed-breed flag.
     out["primary_breed"] = raw["Breed"].map(_primary_breed)
     out["is_mixed_breed"] = raw["Breed"].map(_is_mixed_breed)
     out["primary_color"] = raw["Color"].map(_primary_color)
 
+    # Enforce a fixed column order, then validate the schema before returning.
     out = out[ENGINEERED_FEATURE_COLUMNS]
     _validate_engineered(out)
     return out
@@ -216,6 +241,7 @@ def load_merged_data(outcome_path: str, intake_path: str) -> pd.DataFrame:
     outcome = pd.read_csv(outcome_path)
     intake = pd.read_csv(intake_path)
 
+    # Align the intake schema and parse both timestamps for temporal matching.
     intake = intake.rename(columns={"animal_id": "AnimalID"})
     intake["datetime"] = pd.to_datetime(intake["datetime"], errors="coerce")
     outcome["_outcome_dt"] = pd.to_datetime(outcome["DateTime"], errors="coerce")
@@ -225,12 +251,14 @@ def load_merged_data(outcome_path: str, intake_path: str) -> pd.DataFrame:
         on="AnimalID",
         how="inner",
     )
+    # Keep only intakes at/before the outcome, then take the most recent such intake per animal.
     merged = merged[merged["datetime"] <= merged["_outcome_dt"]]
     merged = (
         merged.sort_values("datetime", ascending=False)
         .drop_duplicates(subset="AnimalID")
         .reset_index(drop=True)
     )
+    # Replace the outcome-time sex/age/date with their intake-time equivalents.
     return (
         merged
         .drop(columns=["DateTime", "_outcome_dt", "SexuponOutcome", "AgeuponOutcome"])

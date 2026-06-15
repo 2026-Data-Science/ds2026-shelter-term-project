@@ -1,3 +1,12 @@
+"""Experiment: sweep PCA variance thresholds and compare K-Means quality.
+
+For each variance threshold (and a no-PCA baseline) this reduces the encoded
+features, grids K, and reports silhouette in both PCA and full space along with
+cluster-size balance and duration profiles. The threshold summary feeds the
+report's discussion of why a high (0.95) threshold is the stable production
+choice. Production outputs are not modified.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -62,6 +71,7 @@ def _prepare_pca_reduced(
     encoded: np.ndarray,
     threshold: float,
 ) -> tuple[np.ndarray, int, float]:
+    # Fit full PCA once, then slice to the components needed for this variance threshold.
     pca_full = PCA(n_components=encoded.shape[1], svd_solver="full", random_state=DEFAULT_RANDOM_STATE)
     full_reduced = pca_full.fit_transform(encoded)
     explained = pca_full.explained_variance_ratio_
@@ -82,6 +92,7 @@ def _dual_silhouette(
     encoded: np.ndarray,
     labels: np.ndarray,
 ) -> tuple[float, float]:
+    # Compare cluster separation in the reduced PCA space vs the full encoded space.
     sample_size = _silhouette_sample_size(len(reduced))
     sil_pca = float(
         silhouette_score(

@@ -1,3 +1,11 @@
+"""Experiment: baseline (full-feature) vs PCA-reduced K-Means, scored by silhouette.
+
+Sweeps several PCA settings (variance thresholds and fixed component counts) plus
+the no-PCA baseline, grids K=2..6 for each, and records silhouette, inertia and
+cluster-size balance. Writes a CSV and a markdown summary recommending settings
+for the report. This is exploratory only and does not change production clustering.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -100,6 +108,7 @@ def _iter_embedding_configs(encoded: np.ndarray) -> list[tuple[str, str, np.ndar
     max_dim = encoded.shape[1]
     configs: list[tuple[str, str, np.ndarray, int, float]] = []
 
+    # 1) Baseline: cluster on the full encoded matrix, no PCA.
     configs.append(
         (
             "baseline",
@@ -114,6 +123,7 @@ def _iter_embedding_configs(encoded: np.ndarray) -> list[tuple[str, str, np.ndar
     full_reduced = pca_full.fit_transform(encoded)
     explained = pca_full.explained_variance_ratio_
 
+    # 2) PCA by variance threshold: keep enough components to reach each target.
     for threshold in VARIANCE_THRESHOLDS:
         n_components = _select_n_components_for_variance(explained, threshold)
         reduced = full_reduced[:, :n_components]
@@ -127,6 +137,7 @@ def _iter_embedding_configs(encoded: np.ndarray) -> list[tuple[str, str, np.ndar
             )
         )
 
+    # 3) PCA with fixed component counts (skip any larger than the feature dimension).
     for n_components in FIXED_N_COMPONENTS:
         if n_components > max_dim:
             continue
@@ -308,6 +319,7 @@ def write_pca_kmeans_comparison_report(
         rec_k = int(best_overall["k"])
         rec_sil = float(best_overall["silhouette_score"])
         min_max_ratio = float(best_overall["min_cluster_size"]) / float(best_overall["max_cluster_size"])
+        # If the top silhouette combo has a tiny cluster, fall back to a more balanced one.
         if min_max_ratio < CLUSTER_IMBALANCE_RATIO_THRESHOLD:
             stable = species_frame[
                 (species_frame["min_cluster_size"] / species_frame["max_cluster_size"])

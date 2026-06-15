@@ -1,3 +1,11 @@
+"""Hyperparameter search step: GridSearchCV over LogisticRegression and RandomForest.
+
+Splits off an 80/20 stratified hold-out, runs a macro-F1-scored grid search
+(8 LR + 36 RF combinations) under 5-fold stratified CV, refits the best estimator
+per model, and reports hold-out accuracy / macro F1 / weighted F1. The Dummy model
+has no grid and is fit directly as the lower-bound reference.
+"""
+
 import pandas as pd
 
 from sklearn.pipeline import Pipeline
@@ -24,8 +32,10 @@ X = df.drop(
 # Target variable
 y = df[TARGET_COLUMN]
 
+# 5-fold stratified CV used inside GridSearchCV to score each parameter combination.
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
+# Hold out 20% for the final unbiased evaluation; search only touches the train split.
 X_train, X_test, y_train, y_test = train_test_split(
     X,
     y,
@@ -51,6 +61,7 @@ models = {
     )
 }
 
+# Search spaces per model (macro-F1 optimised). Dummy has nothing to tune.
 param_grids = {
     "DummyClassifier": {},
 
@@ -79,6 +90,7 @@ for model_name, classifier in models.items():
     print("=" * 60)
     print(f"Tuning {model_name}...")
 
+    # Preprocessing + classifier as one estimator, so the grid refits preprocessing per fold.
     model = Pipeline([
         ("preprocessing", build_preprocessing_pipeline()),
         ("classifier", classifier)
@@ -90,6 +102,7 @@ for model_name, classifier in models.items():
         best_model = model
         best_params = "No tuning"
     else:
+        # Grid search scored on macro F1 to prioritise minority-class performance.
         grid_search = GridSearchCV(
             estimator=model,
             param_grid=param_grids[model_name],
@@ -109,6 +122,7 @@ for model_name, classifier in models.items():
 
     best_models[model_name] = best_model
 
+    # Evaluate the refit best estimator on the untouched hold-out set.
     print(f"Predicting with best {model_name}...")
     pred = best_model.predict(X_test)
 
